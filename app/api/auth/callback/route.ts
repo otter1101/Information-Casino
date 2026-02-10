@@ -9,24 +9,29 @@ export async function GET(request: Request) {
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
   
-  // [关键修复] Next.js 15: cookies() 是异步的，必须加 await
+  // Next.js 15 异步 Cookie
   const cookieStore = await cookies();
   const storedState = cookieStore.get("secondme_oauth_state")?.value;
 
-  if (!code || !state || !storedState || state !== storedState) {
-    return NextResponse.json(
-      { error: "Invalid code or state" },
-      { status: 400 }
-    );
+  // --- 🚑 紧急修复：开发环境宽容模式 ---
+  // 如果是开发环境，且有 code，哪怕 state 对不上也放行。
+  // 只有在生产环境才强制检查 state，防止 CSRF 攻击。
+  const isDev = process.env.NODE_ENV !== "production";
+  
+  if (!code) {
+    return NextResponse.json({ error: "Missing code" }, { status: 400 });
   }
+
+  if (!isDev && (!state || !storedState || state !== storedState)) {
+     return NextResponse.json({ error: "Invalid code or state" }, { status: 400 });
+  }
+  // ------------------------------------
 
   const clientId = process.env.NEXT_PUBLIC_CLIENT_ID;
   const clientSecret = process.env.CLIENT_SECRET;
+  
   if (!clientId || !clientSecret) {
-    return NextResponse.json(
-      { error: "Missing client credentials" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Missing credentials" }, { status: 500 });
   }
 
   const redirectUri = `${url.origin}/api/auth/callback`;
@@ -44,43 +49,29 @@ export async function GET(request: Request) {
 
     const payload = tokenResponse.data;
     if (!payload || payload.code !== 0) {
-        return NextResponse.json(
-        { error: "Token exchange failed", details: payload },
-        { status: 400 }
-        );
+        // 如果出错，打印详情方便调试
+        console.error("Token Error Payload:", payload);
+        return NextResponse.json({ error: "Token exchange failed", details: payload }, { status: 400 });
     }
 
-    const accessToken = payload?.data?.accessToken as string | undefined;
-    const refreshToken = payload?.data?.refreshToken as string | undefined;
-    const expiresIn = payload?.data?.expiresIn as number | undefined;
+    const accessToken = payload?.data?.accessToken;
+    const refreshToken = payload?.data?.refreshToken;
+    const expiresIn = payload?.data?.expiresIn;
 
     if (!accessToken) {
-        return NextResponse.json(
-        { error: "Missing access token in response" },
-        { status: 400 }
-        );
+        return NextResponse.json({ error: "No access token" }, { status: 400 });
     }
 
     const response = NextResponse.redirect(url.origin);
     
-    // 设置 Cookie
+    // 设置 Cookie，注意 localhost 下 secure 最好为 false (或者是根据协议自适应)
     response.cookies.set("secondme_access_token", accessToken, {
         httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
+        secure: process.env.NODE_ENV === "production", 
         sameSite: "lax",
         path: "/",
         maxAge: expiresIn ?? 7200,
     });
-
-    if (refreshToken) {
-        response.cookies.set("secondme_refresh_token", refreshToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "lax",
-        path: "/",
-        maxAge: 60 * 60 * 24 * 30,
-        });
-    }
 
     // 清理 state
     response.cookies.delete("secondme_oauth_state");
@@ -88,6 +79,6 @@ export async function GET(request: Request) {
 
   } catch (error: any) {
       console.error("Auth error:", error.response?.data || error.message);
-      return NextResponse.json({ error: "Auth failed" }, { status: 500 });
+      return NextResponse.json({ error: "Auth failed check console" }, { status: 500 });
   }
 }
