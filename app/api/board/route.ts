@@ -37,7 +37,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { action, userContext, agentId, type, round, targetContent, targetAgentName, agentA, agentB } = body;
 
-    // --- Helper: Find Agent ---
+    // --- Helper: 查找 Agent ---
     const findAgent = async (id: string) => {
         if (id.startsWith('db_')) {
             const uid = id.replace('db_', '');
@@ -57,7 +57,7 @@ export async function POST(request: Request) {
       const cookieStore = await cookies();
       const token = cookieStore.get("secondme_access_token")?.value;
       
-      // 1. 获取当前登录者 (我)
+      // 1. 获取当前登录者
       let myAgent = { id: 'guest_user', name: '我 (Guest)', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Guest', shades: [], system_prompt: '', isReal: false };
       let currentUserId = null;
 
@@ -75,92 +75,73 @@ export async function POST(request: Request) {
         } catch(e) {}
       }
 
-      // 2. 🚀 智能选人逻辑
+      // 2. 智能选人 (基于标签)
       let boardAgents: any[] = [];
-      
       if (process.env.SUPABASE_SERVICE_KEY) {
-          // A. 海选：先拉取最近活跃的 50 个真人 (保证是活人)
           let query = supabase.from('users').select('*').order('last_seen', { ascending: false }).limit(50);
           if (currentUserId) query = query.neq('id', currentUserId);
-          
           const { data: candidates } = await query;
 
           if (candidates && candidates.length > 0) {
-              // B. 定义高优标签 (你要求的核心职业)
-              // 只要标签里包含这些字眼，权重就极高
               const PRIORITY_TAGS = ['AI', '产品', 'Product', '工程师', 'Engineer', '创业', 'Founder', '技术', 'Tech'];
-              
-              // C. 评分系统
               const scoredCandidates = candidates.map(u => {
                   let score = 0;
-                  // 此时 u.shades 是 JSON 对象或数组
-                  // 我们尝试转成字符串来匹配
-                  const shadesStr = JSON.stringify(u.shades || []).toLowerCase();
-                  const promptStr = (u.system_prompt || "").toLowerCase();
-                  const fullText = shadesStr + " " + promptStr;
-
-                  // 规则1：命中高优标签 (+10分/个)
-                  PRIORITY_TAGS.forEach(tag => {
-                      if (fullText.includes(tag.toLowerCase())) score += 10;
-                  });
-
-                  // 规则2：上下文相关性 (简单匹配用户输入的内容) (+5分)
-                  // 比如用户搜"求职"，如果 Agent 标签里有 "求职" 或 "招聘"，加分
+                  const fullText = (JSON.stringify(u.shades || []) + " " + (u.system_prompt || "")).toLowerCase();
+                  PRIORITY_TAGS.forEach(tag => { if (fullText.includes(tag.toLowerCase())) score += 10; });
                   if (userContext) {
-                      const contextKeywords = userContext.slice(0, 50).toLowerCase(); // 取前50字作为关键词源
-                      if (fullText.includes(contextKeywords)) score += 5;
+                      const keywords = userContext.slice(0, 50).toLowerCase();
+                      if (fullText.includes(keywords)) score += 5;
                   }
-
                   return { ...u, matchScore: score };
               });
-
-              // D. 排序：分数高者在前，分数相同按时间
               scoredCandidates.sort((a, b) => b.matchScore - a.matchScore);
-
-              // E. 选取前 3 名
-              const topPicks = scoredCandidates.slice(0, 3);
-
-              boardAgents = topPicks.map(u => ({
-                  id: `db_${u.id}`,
-                  name: u.name,
-                  avatar: u.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.name}`,
-                  shades: u.shades || [],
-                  system_prompt: u.system_prompt,
-                  // 在名字后面加个标签展示，显摆一下匹配度 (可选)
-                  // name: `${u.name} ${u.matchScore > 0 ? '⭐' : ''}` 
+              boardAgents = scoredCandidates.slice(0, 3).map(u => ({
+                  id: `db_${u.id}`, name: u.name, avatar: u.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.name}`,
+                  shades: u.shades || [], system_prompt: u.system_prompt
               }));
           }
       }
 
-      // 3. 补位逻辑 (如果还没凑够 3 人，用精英 NPC 补)
-      // NPC 也要选符合你要求的：Kevin(VC/创业), Steve(产品), Woz(技术) 正好完美对应你的需求！
+      // 3. NPC 补位 (Steve, Woz, Kevin)
       if (boardAgents.length < 3) {
           const needed = 3 - boardAgents.length;
-          // 优先顺序: Steve(产品) -> Woz(技术) -> Kevin(创业/VC)
-          const priorityNPCs = [
-              'steve-product-tyrant', // 对应 AI产品
-              'woz-tech-pessimist',   // 对应 工程师
-              'kevin-greedy-vc'       // 对应 创业者
-          ];
-          
-          const backupNPCs = mockAgents.filter(a => priorityNPCs.includes(a.id));
-          // 按 priorityNPCs 的顺序排序 backupNPCs
-          const sortedBackups = backupNPCs.sort((a, b) => priorityNPCs.indexOf(a.id) - priorityNPCs.indexOf(b.id));
-          
-          // 过滤掉已经在 board 里的
-          const remainingNPCs = sortedBackups.slice(0, needed);
-          boardAgents = [...boardAgents, ...remainingNPCs];
+          const priorityNPCs = ['steve-product-tyrant', 'woz-tech-pessimist', 'kevin-greedy-vc'];
+          const backupNPCs = mockAgents.filter(a => priorityNPCs.includes(a.id)).sort((a, b) => priorityNPCs.indexOf(a.id) - priorityNPCs.indexOf(b.id));
+          boardAgents = [...boardAgents, ...backupNPCs.slice(0, needed)];
       }
 
       return NextResponse.json({ agents: [...boardAgents, myAgent] });
     }
 
-    // --- AUDITION & BETTING (保持之前的修复版：字数控制+去星号) ---
+    // =========================================================================
+    // ACTION: AUDITION & BETTING (含存钱逻辑)
+    // =========================================================================
     if (action === 'AUDITION' || action === 'BETTING') {
         const targetAgent = await findAgent(agentId) || { name: "Agent", system_prompt: "" };
         let prompt = "";
         const styleGuide = `【格式铁律】：1. 严禁使用 Markdown 星号 (*, **)。2. 严禁使用分点列表。3. 请输出一段完整的自然段落。4. 字数严格控制在 150 字以内。`;
 
+        // --- 存钱逻辑 (仅 BETTING) ---
+        if (action === 'BETTING') {
+            const PRICES = { critique: 10, deep_dive: 20, synthesis: 15 }; // synthesis 是每人 15
+            
+            // 1. 如果是合作 (Synthesis)，给两个人分钱
+            if (type === 'synthesis') {
+                if (agentA?.startsWith('db_')) {
+                    await supabase.rpc('increment_wealth', { row_id: agentA.replace('db_', ''), amount: PRICES.synthesis });
+                }
+                if (agentB?.startsWith('db_')) {
+                    await supabase.rpc('increment_wealth', { row_id: agentB.replace('db_', ''), amount: PRICES.synthesis });
+                }
+            } 
+            // 2. 如果是单人动作，给一个人加钱
+            else if (agentId?.startsWith('db_')) {
+                const amount = type === 'deep_dive' ? PRICES.deep_dive : PRICES.critique;
+                await supabase.rpc('increment_wealth', { row_id: agentId.replace('db_', ''), amount });
+            }
+        }
+
+        // --- Prompt 逻辑 ---
         if (action === 'AUDITION') {
             if (round === 1) prompt = `${targetAgent.system_prompt}\n${styleGuide}\n【任务】：Round 1 - 建设性方案。\n【用户背景】：${userContext}\n请直接给出一个核心建议。`;
             else if (round === 2) prompt = `${targetAgent.system_prompt}\n${styleGuide}\n【任务】：Round 2 - 批判性攻击。\n【对象】：${targetAgentName}\n【观点】："${targetContent}"\n请直接回怼。`;
@@ -175,6 +156,7 @@ export async function POST(request: Request) {
                  prompt = `${targetAgent.system_prompt}\n用户付费加大火力。\n要求：犀利指出弱点，字数100字内，严禁星号。`;
             }
         }
+        
         const reply = await callMiniMax(prompt, "请输出。", targetAgent.name || "Agent");
         return NextResponse.json(reply);
     }
