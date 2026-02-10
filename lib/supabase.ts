@@ -1,6 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-
-// 获取环境变量
+123
 const envUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const envKey = process.env.SUPABASE_SERVICE_KEY;
 
