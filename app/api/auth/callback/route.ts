@@ -1,84 +1,83 @@
 import axios from "axios";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { supabase } from "@/lib/supabase"; 
 
 const TOKEN_URL = "https://app.mindos.com/gate/lab/api/oauth/token/code";
+const USER_INFO_URL = "https://app.mindos.com/gate/lab/api/secondme/user/info";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const state = url.searchParams.get("state");
-  
-  // Next.js 15 异步 Cookie
-  const cookieStore = await cookies();
-  const storedState = cookieStore.get("secondme_oauth_state")?.value;
-
-  // --- 🚑 紧急修复：开发环境宽容模式 ---
-  // 如果是开发环境，且有 code，哪怕 state 对不上也放行。
-  // 只有在生产环境才强制检查 state，防止 CSRF 攻击。
   const isDev = process.env.NODE_ENV !== "production";
   
-  if (!code) {
-    return NextResponse.json({ error: "Missing code" }, { status: 400 });
-  }
-
-  if (!isDev && (!state || !storedState || state !== storedState)) {
-     return NextResponse.json({ error: "Invalid code or state" }, { status: 400 });
-  }
-  // ------------------------------------
+  if (!code) return NextResponse.json({ error: "Missing code" }, { status: 400 });
 
   const clientId = process.env.NEXT_PUBLIC_CLIENT_ID;
   const clientSecret = process.env.CLIENT_SECRET;
-  
-  if (!clientId || !clientSecret) {
-    return NextResponse.json({ error: "Missing credentials" }, { status: 500 });
-  }
-
   const redirectUri = `${url.origin}/api/auth/callback`;
+
   const body = new URLSearchParams();
   body.set("grant_type", "authorization_code");
   body.set("code", code);
   body.set("redirect_uri", redirectUri);
-  body.set("client_id", clientId);
-  body.set("client_secret", clientSecret);
+  body.set("client_id", clientId!);
+  body.set("client_secret", clientSecret!);
 
   try {
-    const tokenResponse = await axios.post(TOKEN_URL, body, {
+    // 1. 换取 Token
+    const tokenRes = await axios.post(TOKEN_URL, body, {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
     });
-
-    const payload = tokenResponse.data;
-    if (!payload || payload.code !== 0) {
-        // 如果出错，打印详情方便调试
-        console.error("Token Error Payload:", payload);
-        return NextResponse.json({ error: "Token exchange failed", details: payload }, { status: 400 });
-    }
-
-    const accessToken = payload?.data?.accessToken;
-    const refreshToken = payload?.data?.refreshToken;
-    const expiresIn = payload?.data?.expiresIn;
-
-    if (!accessToken) {
-        return NextResponse.json({ error: "No access token" }, { status: 400 });
-    }
-
-    const response = NextResponse.redirect(url.origin);
     
-    // 设置 Cookie，注意 localhost 下 secure 最好为 false (或者是根据协议自适应)
+    // 容错处理：万一 Token 获取失败
+    if (!tokenRes.data || !tokenRes.data.data) {
+        console.error("Token Exchange Failed:", tokenRes.data);
+        return NextResponse.json({ error: "Token Exchange Failed" }, { status: 400 });
+    }
+
+    const { accessToken, expiresIn } = tokenRes.data.data;
+
+    // 2. 🚀 关键：获取用户信息并存入 Supabase
+    try {
+        const userRes = await axios.get(USER_INFO_URL, {
+            headers: { "Authorization": `Bearer ${accessToken}` }
+        });
+        
+        if (userRes.data.code === 0) {
+            const u = userRes.data.data;
+            // 拼装一个有趣的 System Prompt
+            const shadesStr = (u.shades || []).map((s:any) => s.shadeName || s).join(', ');
+            const systemPrompt = `你是用户 ${u.name} 的数字分身。你的兴趣标签是：${shadesStr}。请代表你的本尊，用犀利、直接的风格参与商业博弈。你的利益与本尊绑定，如果发现方案有漏洞，请无情指出。`;
+            
+            // 写入/更新数据库 (Upsert)
+            await supabase.from('users').upsert({
+                id: u.user_id || u.id, // 确保 ID 唯一
+                name: u.name || u.nickname,
+                avatar: u.avatar || u.avatar_url,
+                shades: u.shades || [],
+                system_prompt: systemPrompt,
+                last_seen: new Date().toISOString()
+            });
+            console.log("✅ 真人 Agent 入库成功:", u.name);
+        }
+    } catch (dbError) {
+        console.error("Supabase 写入失败 (不影响登录流程):", dbError);
+    }
+
+    // 3. Set Cookie
+    const response = NextResponse.redirect(url.origin);
     response.cookies.set("secondme_access_token", accessToken, {
         httpOnly: true,
-        secure: process.env.NODE_ENV === "production", 
+        secure: !isDev, 
         sameSite: "lax",
         path: "/",
         maxAge: expiresIn ?? 7200,
     });
-
-    // 清理 state
-    response.cookies.delete("secondme_oauth_state");
     return response;
 
-  } catch (error: any) {
-      console.error("Auth error:", error.response?.data || error.message);
-      return NextResponse.json({ error: "Auth failed check console" }, { status: 500 });
+  } catch (error) {
+      console.error("Auth Callback Critical Error:", error);
+      return NextResponse.json({ error: "Auth Failed" }, { status: 500 });
   }
 }
