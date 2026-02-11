@@ -52,6 +52,32 @@ export default function BoardGame() {
     const match = document.cookie.match(new RegExp(`(^| )${name}=([^;]+)`));
     return match ? decodeURIComponent(match[2]) : "";
   };
+
+  const safeDecode = (value: string) => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
+
+  const renderIdentityTag = (agent: any) => {
+    if (agent?.isRealUser) {
+      return (
+        <span className="ml-2 rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] text-amber-400 border border-amber-500/40">
+          [AI 分身]
+        </span>
+      );
+    }
+    if (agent?.isNPC) {
+      return (
+        <span className="ml-2 rounded-full bg-neutral-700/40 px-2 py-0.5 text-[10px] text-neutral-400 border border-neutral-700">
+          [NPC]
+        </span>
+      );
+    }
+    return null;
+  };
   
   // --- 1. 核心登录逻辑 (OAuth) ---
   const handleLogin = () => {
@@ -115,6 +141,8 @@ export default function BoardGame() {
           if (data.name && data.avatar) {
             setUserInfo({ name: data.name as string, avatar: data.avatar as string });
           }
+        } else {
+          setUserChips(100);
         }
      };
 
@@ -122,16 +150,15 @@ export default function BoardGame() {
         fetchWealth().catch(() => {});
      }
 
-     const fetchTotalUsers = async () => {
+     const fetchCount = async () => {
         const { count } = await supabase
           .from("users")
-          .select("id", { count: "exact", head: true });
-        if (typeof count === "number") {
-          setTotalUsers(count);
-        }
+          .select("*", { count: "exact", head: true });
+
+        if (count !== null) setTotalUsers(count);
      };
 
-     fetchTotalUsers().catch(() => {});
+     fetchCount().catch(() => {});
      
      // 恢复游戏进度
      const saved = localStorage.getItem("casino_v11");
@@ -165,12 +192,19 @@ export default function BoardGame() {
   useEffect(() => {
     if (showLeaderboard) {
         const fetchLeaderboard = async () => {
-            const { data } = await supabase
+            const { data, error } = await supabase
                 .from('users')
                 .select('name, wealth')
                 .order('wealth', { ascending: false })
                 .limit(10);
-            if (data) setLeaderboardData(data);
+            if (!error && data && data.length > 0) {
+              setLeaderboardData(data);
+            } else {
+              setLeaderboardData([
+                { name: "匿名大佬A", wealth: 888 },
+                { name: "匿名大佬B", wealth: 520 },
+              ]);
+            }
         };
         fetchLeaderboard();
     }
@@ -217,6 +251,8 @@ export default function BoardGame() {
           avatar: smAvatar || "https://api.dicebear.com/7.x/avataaars/svg?seed=Me",
           shades: userShades,
           system_prompt: `你是 ${smName} 的数字分身。你的核心特质/标签是：${userShades.join("、") || "综合"}。请务必基于这些特质进行回答，展现真人的个性。`,
+          isRealUser: true,
+          isNPC: false,
         };
       }
       setAgents(boardAgents);
@@ -387,7 +423,7 @@ export default function BoardGame() {
                       // 如果已登录，显示头像和名字
                       <div className="flex items-center gap-2 bg-neutral-800 px-3 py-1 rounded-full border border-amber-500/50 shadow-lg">
                           <img src={userInfo.avatar} className="w-6 h-6 rounded-full border border-amber-500" />
-                          <span className="text-xs text-amber-500 font-bold">{userInfo.name}</span>
+                          <span className="text-xs text-amber-500 font-bold">{safeDecode(userInfo.name)}</span>
                           <span className="text-[10px] text-green-500">● 已连接</span>
                       </div>
                   ) : (
@@ -447,7 +483,7 @@ export default function BoardGame() {
             
             {/* ✅ 核心修改：Navbar 里的头像显示 */}
             {userInfo ? (
-                <div className="flex items-center gap-2" title={userInfo.name}>
+                <div className="flex items-center gap-2" title={safeDecode(userInfo.name)}>
                     <img src={userInfo.avatar} className="w-6 h-6 rounded-full border border-amber-500" />
                 </div>
             ) : (
@@ -496,7 +532,8 @@ export default function BoardGame() {
                 <div className="flex items-center justify-between mb-3 border-b border-neutral-800 pb-3">
                    <div className="flex items-center gap-2">
                        <img src={row.victim.avatar} className="w-8 h-8 rounded-full bg-neutral-800"/>
-                       <span className="font-bold text-amber-500 text-sm">{row.victim.name}</span>
+                      <span className="font-bold text-amber-500 text-sm">{safeDecode(row.victim.name)}</span>
+                      {renderIdentityTag(row.victim)}
                    </div>
                    {phase === 'betting' && (
                        <div className="flex gap-2 items-center">
@@ -516,8 +553,9 @@ export default function BoardGame() {
                 <div className="flex items-center justify-between mb-3 border-b border-red-900/10 pb-3">
                    <div className="flex items-center gap-2">
                        <img src={row.attacker.avatar} className="w-8 h-8 rounded-full bg-neutral-800 grayscale"/>
-                       <span className="font-bold text-red-400 text-sm">{row.attacker.name}</span>
-                       <span className="text-[10px] text-red-900/70 ml-2">回怼 {row.victim.name}</span>
+                      <span className="font-bold text-red-400 text-sm">{safeDecode(row.attacker.name)}</span>
+                      {renderIdentityTag(row.attacker)}
+                      <span className="text-[10px] text-red-900/70 ml-2">回怼 {safeDecode(row.victim.name)}</span>
                    </div>
                    {phase === 'betting' && (
                        <div className="flex gap-2">
@@ -573,12 +611,12 @@ export default function BoardGame() {
                     <button onClick={() => setShowLeaderboard(false)} className="absolute top-4 right-4 text-neutral-500 hover:text-white">✕</button>
                     <h2 className="text-xl font-bold text-amber-500 mb-4 flex items-center gap-2"><span>🏆</span> 知识币排行榜 (全网)</h2>
                     <div className="space-y-3">
-                        {leaderboardData.length === 0 ? <p className="text-neutral-500 text-sm">正在读取数据...</p> : 
+                        {leaderboardData.length === 0 ? <p className="text-neutral-500 text-sm">暂无数据</p> : 
                          leaderboardData.map((user, idx) => (
                              <div key={idx} className="flex justify-between items-center bg-neutral-800 p-3 rounded">
                                  <div className="flex items-center gap-3">
                                      <span className={`font-bold text-sm w-4 ${idx === 0 ? 'text-yellow-400' : 'text-neutral-500'}`}>{idx + 1}</span>
-                                     <span className="text-white text-sm">{user.name || "匿名大佬"}</span>
+                                    <span className="text-white text-sm">{safeDecode(user.name || "匿名大佬")}</span>
                                  </div>
                                  <span className="text-green-400 font-mono font-bold">¥{user.wealth || 0}</span>
                              </div>

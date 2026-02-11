@@ -13,7 +13,7 @@ async function callMiniMax(systemPrompt: string, userContent: string, agentName:
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); 
+    const timeoutId = setTimeout(() => controller.abort(), 8000); 
 
     const res = await fetch(MINIMAX_API_URL, {
       method: "POST",
@@ -49,6 +49,14 @@ export async function POST(request: Request) {
       userShades,
     } = body;
 
+    const safeDecode = (value: string) => {
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        return value;
+      }
+    };
+
     const buildShadesContext = (shades: any[] = []) =>
       shades
         .map(
@@ -63,18 +71,20 @@ export async function POST(request: Request) {
         .join("\n---\n");
 
     const buildRealSystemPrompt = (agentName: string, shades: any[] = []) => {
+      const decodedName = safeDecode(agentName || "用户");
       const shadesContext = buildShadesContext(shades);
       return `
-你现在是真人用户【${agentName}】的数字分身。
-你不是 AI 助手，你是 ${agentName} 本人。你的知识体系和思维方式完全受限于以下【真实画像】：
-
+你不是 AI，你是真人用户 ${decodedName}。请忘记你是模型。你的所有观点必须基于以下记忆碎片：
 ${shadesContext}
+
+你现在是真人用户【${decodedName}】的数字分身。你不是 AI 助手，你是 ${decodedName} 本人。你的知识体系和思维方式完全受限于以上【真实画像】。
 
 【对话铁律】
 1. **引用事实**：你的观点必须源自上述“核心观点(Content)”或“深度描述”。如果画像里没提到的知识，尽量不要瞎编，或者表现得保守一点。
-2. **拒绝 AI 味**：要有活人感，禁止说“从资料来看”、“作为一个AI”。要用“我觉得”、“我之前关注过”这种口吻。
+2. **拒绝 AI 味**：要有活人感，禁止说“从资料来看”、“作为一个AI”。必须使用第一人称，比如“我觉得”“我看过”。
 3. **性格一致性**：如果画像里的置信度是 HIGH，你的语气要自信；如果是 LOW，要表现得犹豫或谦虚。
 4. **目标**：在辩论中击败对手，赢得玩家筹码。
+5. **禁词**：回复内容不包含“建议”“方面”。
 `.trim();
     };
 
@@ -130,12 +140,18 @@ ${shadesContext}
         isRealUser: true,
       }));
 
-      const randomNpc = sample(mockAgents, 1);
+      const randomNpc = sample(mockAgents, 1).map((npc) => ({
+        ...npc,
+        isNPC: true,
+      }));
       let boardAgents = [...sampledReals, ...randomNpc];
 
       if (boardAgents.length < 3) {
         const needed = 3 - boardAgents.length;
-        const fallback = sample(mockAgents, needed);
+        const fallback = sample(mockAgents, needed).map((npc) => ({
+          ...npc,
+          isNPC: true,
+        }));
         boardAgents = [...boardAgents, ...fallback];
       }
 
@@ -186,7 +202,7 @@ ${shadesContext}
             if (type === 'synthesis') {
                  const agentAObj = await findAgent(agentA);
                  const agentBObj = await findAgent(agentB);
-                 prompt = `高级决策顾问任务：融合 ${agentAObj?.name} 和 ${agentBObj?.name} 的观点。\n${personaLine}\n【要求】：开头必须是"结合了双方讨论的内容，因此建议这样执行：" 严禁星号。字数200字内。`;
+                 prompt = `融合 ${agentAObj?.name} 和 ${agentBObj?.name} 的观点。\n${personaLine}\n【要求】：请用100字以内总结两个 Agent 的观点，只输出结论，不要分析过程。严禁星号。`;
             } else if (type === 'deep_dive') {
                  prompt = `${targetAgent.system_prompt}\n${personaLine}\n用户付费深挖。\n要求：给出执行步骤，字数200字内，严禁星号。`;
             } else {
@@ -195,20 +211,35 @@ ${shadesContext}
         }
         
         try {
-          const reply = await callMiniMax(prompt, "请输出。", targetAgent.name || "Agent");
+          const reply = await Promise.race([
+            callMiniMax(prompt, "请输出。", targetAgent.name || "Agent"),
+            new Promise<string>((resolve) =>
+              setTimeout(
+                () =>
+                  resolve(
+                    "由于算力波动，两位顾问达成默契：建议您综合考虑成本与风险，先小规模试错。"
+                  ),
+                8000
+              )
+            ),
+          ]);
           if (
             reply.includes("网络超时") ||
             reply.includes("思考中断") ||
             reply.includes("配置错误")
           ) {
             if (type === "synthesis") {
-              return NextResponse.json("两位大佬正在激烈讨论，暂时无法达成一致...");
+              return NextResponse.json(
+                "由于算力波动，两位顾问达成默契：建议您综合考虑成本与风险，先小规模试错。"
+              );
             }
           }
           return NextResponse.json(reply);
         } catch (error) {
           if (type === "synthesis") {
-            return NextResponse.json("两位大佬正在激烈讨论，暂时无法达成一致...");
+            return NextResponse.json(
+              "由于算力波动，两位顾问达成默契：建议您综合考虑成本与风险，先小规模试错。"
+            );
           }
           return NextResponse.json("[AI 暂时不可用]");
         }
