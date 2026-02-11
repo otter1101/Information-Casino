@@ -3,8 +3,11 @@ import { cookies } from "next/headers";
 import { mockAgents } from "@/lib/mock-agents";
 import { supabase } from "@/lib/supabase";
 
+export const runtime = "edge";
+
 const MINIMAX_API_URL = "https://api.minimax.chat/v1/chat/completions";
 const MINIMAX_MODEL = "abab5.5-chat";
+const STREAM_TIMEOUT_MS = 8500;
 
 type BoardAction = "MATCH" | "AUDITION" | "BETTING";
 type BettingType = "critique" | "deep_dive" | "synthesis";
@@ -69,8 +72,8 @@ ${richContext}
 
 const getFirstShadeName = (shades: any[] = []) => {
   const first = shades[0];
-  if (!first) return "通用";
-  return first.shadeName || first.shadeNamePublic || first.name || "通用";
+  if (!first) return "技术";
+  return first.shadeName || first.shadeNamePublic || first.name || "技术";
 };
 
 const buildTimeoutFallback = (agent: AgentProfile) => {
@@ -81,11 +84,23 @@ const buildTimeoutFallback = (agent: AgentProfile) => {
   return `（网络波动）从${firstShadeName}底层逻辑看，这个方案的扩展性还需要再测算一下。`;
 };
 
-const callMiniMax = async (systemPrompt: string, userContent: string) => {
-  const apiKey = process.env.MINIMAX_API_KEY;
-  if (!apiKey || !apiKey.startsWith("sk-")) return "[模型繁忙]";
+const buildOpponentAnchor = (targetName: string) =>
+  `注意：你的对话对象是名为【${targetName}】的真人。即使名字像动物或物品，也请将其视为人类产品经理或创业者。严禁对其名字进行字面意义上的调侃，必须针对其【商业逻辑】进行博弈。`;
 
-  const res = await fetch(MINIMAX_API_URL, {
+const shouldIgnoreHistory = (content?: string) =>
+  !!content &&
+  (content.includes("网络波动") ||
+    content.includes("系统繁忙") ||
+    content.includes("[ERROR]") ||
+    content.includes("模型繁忙"));
+
+const callMiniMaxStream = async (systemPrompt: string, userContent: string) => {
+  const apiKey = process.env.MINIMAX_API_KEY;
+  if (!apiKey || !apiKey.startsWith("sk-")) {
+    throw new Error("missing_key");
+  }
+
+  return fetch(MINIMAX_API_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -99,27 +114,78 @@ const callMiniMax = async (systemPrompt: string, userContent: string) => {
       ],
       temperature: 0.7,
       max_tokens: 240,
+      stream: true,
     }),
   });
-
-  const data = await res.json();
-  if (!res.ok || data.error) return "[模型繁忙]";
-  return data.choices?.[0]?.message?.content || "[无回复]";
 };
 
-const runWithTimeout = async (params: {
-  systemPrompt: string;
-  userContent: string;
-  fallback: string;
-}) => {
-  const startTime = Date.now();
-  const llmPromise = callMiniMax(params.systemPrompt, params.userContent);
-  const timeoutPromise = new Promise<string>((resolve) =>
-    setTimeout(() => resolve(params.fallback), 8500)
-  );
-  const finalContent = await Promise.race([llmPromise, timeoutPromise]);
-  console.log("LLM Response Time:", Date.now() - startTime);
-  return finalContent;
+const streamFromMiniMax = async (
+  systemPrompt: string,
+  userContent: string,
+  fallback: string
+) => {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let aborted = false;
+      const timeoutId = setTimeout(() => {
+        aborted = true;
+        controller.enqueue(encoder.encode(fallback));
+        controller.close();
+      }, STREAM_TIMEOUT_MS);
+
+      try {
+        const res = await callMiniMaxStream(systemPrompt, userContent);
+        if (!res.ok || !res.body) {
+          clearTimeout(timeoutId);
+          controller.enqueue(encoder.encode("[ERROR] stream_failed"));
+          controller.close();
+          return;
+        }
+
+        const reader = res.body.getReader();
+        let buffer = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (aborted || done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data:")) continue;
+            const payload = trimmed.replace("data:", "").trim();
+            if (payload === "[DONE]") {
+              clearTimeout(timeoutId);
+              controller.close();
+              return;
+            }
+            try {
+              const json = JSON.parse(payload);
+              const text =
+                json.choices?.[0]?.delta?.content ||
+                json.choices?.[0]?.message?.content ||
+                json.text ||
+                "";
+              if (text) controller.enqueue(encoder.encode(text));
+            } catch {
+              continue;
+            }
+          }
+        }
+
+        clearTimeout(timeoutId);
+        controller.close();
+      } catch {
+        clearTimeout(timeoutId);
+        controller.enqueue(encoder.encode("[ERROR] stream_exception"));
+        controller.close();
+      }
+    },
+  });
 };
 
 export async function POST(request: Request) {
@@ -163,10 +229,16 @@ export async function POST(request: Request) {
         };
       }
 
+      const normalizedId = rawId.startsWith("db_")
+        ? rawId.replace("db_", "")
+        : rawId.startsWith("real_")
+        ? rawId.replace("real_", "")
+        : rawId;
+
       const { data: user } = await supabase
         .from("users")
         .select("*")
-        .eq("id", rawId)
+        .eq("id", normalizedId)
         .single();
 
       if (user) {
@@ -223,24 +295,27 @@ export async function POST(request: Request) {
       const targetAgent = await getAgentById(agentId);
       const shadesForPersona =
         userShades && userShades.length > 0 ? userShades : targetAgent.shades || [];
-
       const personaPrompt = buildPersonaPrompt(safeDecode(userName), shadesForPersona);
 
-      const opponentName = targetAgentName || "对手";
-      const npcOpponentGuard = `
-注意：你的对话对象是名为【${opponentName}】的真人。即使名字像动物或物品，也请将其视为人类产品经理或创业者。严禁对其名字进行字面意义上的调侃，必须针对其【商业逻辑】进行博弈。
-`.trim();
-
+      const opponentName = targetAgentName || "水濑";
+      const opponentAnchor = buildOpponentAnchor(opponentName);
       const systemPromptBase = targetAgent.isNPC
-        ? `${targetAgent.context}\n${npcOpponentGuard}`
-        : personaPrompt;
+        ? `${targetAgent.context}\n${opponentAnchor}`
+        : `${personaPrompt}\n${opponentAnchor}`;
+
+      const ignoreHistory = shouldIgnoreHistory(targetContent);
+      const cleanTargetContent = ignoreHistory ? "" : targetContent || "";
+      const cleanTargetName = targetAgentName || "对手";
 
       let prompt = systemPromptBase;
       if (action === "AUDITION") {
         if (round === 1) {
           prompt = `${systemPromptBase}\n【任务】：Round 1 - 建设性方案。\n【用户背景】：${userContext}\n请直接给出一个核心建议。`;
         } else if (round === 2) {
-          prompt = `${systemPromptBase}\n【任务】：Round 2 - 批判性攻击。\n【对象】：${targetAgentName}\n【观点】："${targetContent}"\n请直接回怼。`;
+          const historyNote = ignoreHistory
+            ? "前序内容疑似兜底话术，忽略前序，直接针对用户目标独立评论。"
+            : "";
+          prompt = `${systemPromptBase}\n${historyNote}\n【任务】：Round 2 - 批判性攻击。\n【对象】：${cleanTargetName}\n【观点】："${cleanTargetContent}"\n请直接回怼。`;
         }
       } else if (type === "synthesis") {
         const [agentAProfile, agentBProfile] = await Promise.all([
@@ -262,13 +337,18 @@ export async function POST(request: Request) {
         shades: shadesForPersona,
       });
 
-      const finalContent = await runWithTimeout({
-        systemPrompt: prompt,
-        userContent: "请直接输出观点。",
-        fallback: fallbackResponse,
-      });
+      const stream = await streamFromMiniMax(
+        prompt,
+        "请直接输出观点。",
+        fallbackResponse
+      );
 
-      return NextResponse.json(finalContent);
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-cache",
+        },
+      });
     }
 
     return NextResponse.json({ error: "Unknown action" });
