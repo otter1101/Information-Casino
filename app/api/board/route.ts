@@ -9,12 +9,29 @@ const MINIMAX_MODEL = "abab5.5-chat";
 type BoardAction = "MATCH" | "AUDITION" | "BETTING";
 type BettingType = "critique" | "deep_dive" | "synthesis";
 
+type AgentProfile = {
+  name: string;
+  isNPC: boolean;
+  context: string;
+  shades: any[];
+};
+
 const safeDecode = (value: string) => {
   try {
     return decodeURIComponent(value);
   } catch {
     return value;
   }
+};
+
+const sample = <T,>(list: T[], count: number) => {
+  const pool = [...list];
+  const result: T[] = [];
+  while (pool.length && result.length < count) {
+    const index = Math.floor(Math.random() * pool.length);
+    result.push(pool.splice(index, 1)[0]);
+  }
+  return result;
 };
 
 const buildRichContext = (shades: any[]) => {
@@ -50,19 +67,23 @@ ${richContext}
 `.trim();
 };
 
-const sample = <T,>(list: T[], count: number) => {
-  const pool = [...list];
-  const result: T[] = [];
-  while (pool.length && result.length < count) {
-    const index = Math.floor(Math.random() * pool.length);
-    result.push(pool.splice(index, 1)[0]);
+const getFirstShadeName = (shades: any[] = []) => {
+  const first = shades[0];
+  if (!first) return "通用";
+  return first.shadeName || first.shadeNamePublic || first.name || "通用";
+};
+
+const buildTimeoutFallback = (agent: AgentProfile) => {
+  const firstShadeName = getFirstShadeName(agent.shades || []);
+  if (agent.isNPC) {
+    return "（系统繁忙）简而言之，哪怕从风控角度看，这个方案的风险/收益比也需要重新计算。";
   }
-  return result;
+  return `（网络波动）从${firstShadeName}底层逻辑看，这个方案的扩展性还需要再测算一下。`;
 };
 
 const callMiniMax = async (systemPrompt: string, userContent: string) => {
   const apiKey = process.env.MINIMAX_API_KEY;
-  if (!apiKey || !apiKey.startsWith("sk-")) return "[配置错误] Key 无效";
+  if (!apiKey || !apiKey.startsWith("sk-")) return "[模型繁忙]";
 
   const res = await fetch(MINIMAX_API_URL, {
     method: "POST",
@@ -94,25 +115,11 @@ const runWithTimeout = async (params: {
   const startTime = Date.now();
   const llmPromise = callMiniMax(params.systemPrompt, params.userContent);
   const timeoutPromise = new Promise<string>((resolve) =>
-    setTimeout(() => resolve(params.fallback), 9000)
+    setTimeout(() => resolve(params.fallback), 8500)
   );
   const finalContent = await Promise.race([llmPromise, timeoutPromise]);
   console.log("LLM Response Time:", Date.now() - startTime);
   return finalContent;
-};
-
-const getFirstShadeName = (shades: any[] = []) => {
-  const first = shades[0];
-  if (!first) return "通用";
-  return first.shadeName || first.shadeNamePublic || first.name || "通用";
-};
-
-const buildTimeoutFallback = (agent: any) => {
-  const firstShadeName = getFirstShadeName(agent?.shades || []);
-  if (agent?.isNPC) {
-    return "（系统繁忙）简而言之，哪怕从风控角度看，这个方案的风险/收益比也需要重新计算。";
-  }
-  return `（基于【${firstShadeName}】的直觉）... 我觉得从我的经验来看，这个方向还需要再斟酌一下，特别是落地细节方面。`;
 };
 
 export async function POST(request: Request) {
@@ -145,7 +152,7 @@ export async function POST(request: Request) {
       userShades = [],
     } = body;
 
-    const getAgentProfile = async (rawId: string) => {
+    const getAgentById = async (rawId: string): Promise<AgentProfile> => {
       const mockAgent = mockAgents.find((a) => a.id === rawId);
       if (mockAgent) {
         return {
@@ -156,16 +163,10 @@ export async function POST(request: Request) {
         };
       }
 
-      const normalizedId = rawId.startsWith("db_")
-        ? rawId.replace("db_", "")
-        : rawId.startsWith("real_")
-        ? rawId.replace("real_", "")
-        : rawId;
-
       const { data: user } = await supabase
         .from("users")
-        .select("name, shades, avatar")
-        .eq("id", normalizedId)
+        .select("*")
+        .eq("id", rawId)
         .single();
 
       if (user) {
@@ -177,7 +178,12 @@ export async function POST(request: Request) {
         };
       }
 
-      throw new Error(`Agent ${rawId} not found`);
+      return {
+        name: "匿名专家",
+        isNPC: false,
+        context: buildPersonaPrompt("匿名专家", []),
+        shades: [],
+      };
     };
 
     if (action === "MATCH") {
@@ -214,18 +220,15 @@ export async function POST(request: Request) {
     }
 
     if (action === "AUDITION" || action === "BETTING") {
-      console.log("Fetching User Shades for:", agentId);
-      const targetAgent = await getAgentProfile(agentId);
-
+      const targetAgent = await getAgentById(agentId);
       const shadesForPersona =
         userShades && userShades.length > 0 ? userShades : targetAgent.shades || [];
+
       const personaPrompt = buildPersonaPrompt(safeDecode(userName), shadesForPersona);
 
-      const opponentName =
-        targetAgentName || (type === "synthesis" ? "对手" : "对手");
-
+      const opponentName = targetAgentName || "对手";
       const npcOpponentGuard = `
-你的对手名为【${opponentName}】。注意：这只是一个真人的昵称。即使名字包含动物、植物或物品，你也要把他/她视为一位人类创业者。严禁针对名字的字面含义进行生物学批判，必须针对其商业观点反驳。
+注意：你的对话对象是名为【${opponentName}】的真人。即使名字像动物或物品，也请将其视为人类产品经理或创业者。严禁对其名字进行字面意义上的调侃，必须针对其【商业逻辑】进行博弈。
 `.trim();
 
       const systemPromptBase = targetAgent.isNPC
@@ -241,8 +244,8 @@ export async function POST(request: Request) {
         }
       } else if (type === "synthesis") {
         const [agentAProfile, agentBProfile] = await Promise.all([
-          getAgentProfile(agentA || ""),
-          getAgentProfile(agentB || ""),
+          getAgentById(agentA || ""),
+          getAgentById(agentB || ""),
         ]);
         prompt = `${systemPromptBase}\n融合 ${agentAProfile.name} 和 ${agentBProfile.name} 的观点。请用100字以内总结两个 Agent 的观点，只输出结论，不要分析过程。`;
       } else if (type === "deep_dive") {
