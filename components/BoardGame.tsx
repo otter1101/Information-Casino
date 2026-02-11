@@ -40,6 +40,7 @@ export default function BoardGame() {
   const [paidInsightsMap, setPaidInsightsMap] = useState<Record<string, string>>({});
   const [selectedForSynthesis, setSelectedForSynthesis] = useState<string[]>([]);
   const [synthesisResult, setSynthesisResult] = useState<string | null>(null);
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
   
   // ✅ 新增：用户信息状态 (名字和头像)
   const [userInfo, setUserInfo] = useState<{name: string, avatar: string} | null>(null);
@@ -146,10 +147,6 @@ export default function BoardGame() {
         }
      };
 
-     if (name) {
-        fetchWealth().catch(() => {});
-     }
-
      const fetchCount = async () => {
         const { count } = await supabase
           .from("users")
@@ -160,7 +157,15 @@ export default function BoardGame() {
         }
      };
 
-     fetchCount().catch(() => {});
+     const bootstrap = async () => {
+        if (name) {
+          await fetchWealth();
+        }
+        await fetchCount();
+        setIsBootstrapping(false);
+     };
+
+     bootstrap().catch(() => setIsBootstrapping(false));
      
      // 恢复游戏进度
      const saved = localStorage.getItem("casino_v11");
@@ -414,13 +419,35 @@ export default function BoardGame() {
               <h1 className="text-6xl font-bold text-amber-500 tracking-tighter flex flex-col md:block items-center justify-center gap-2">
                 Information Casino <span className="text-4xl text-amber-700 font-normal ml-0 md:ml-4 tracking-normal">| 知识赌场</span>
               </h1>
-              <div className="text-neutral-400 text-lg leading-relaxed max-w-2xl mx-auto font-light">
+              <div
+                key={Date.now()}
+                className="text-neutral-400 text-lg leading-relaxed max-w-2xl mx-auto font-light"
+                style={{
+                  fontFamily: '"SimSun", "STSong", serif',
+                  fontWeight: 900,
+                  fontSize: "1.2rem",
+                  color: "#FFFFFF",
+                  display: "block",
+                  visibility: "visible",
+                  opacity: 1,
+                  lineHeight: 1.8,
+                }}
+              >
                 <p className="text-sm text-amber-400 tracking-wide">
                   🔥 已有 <span className="text-amber-300 font-semibold">{Math.max(totalUsers, 1)}</span> 位数字分身正在博弈
                 </p>
+                {isBootstrapping && (
+                  <div className="mt-3 flex items-center justify-center gap-2 text-xs text-amber-300">
+                    <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-amber-300 border-t-transparent" />
+                    正在连接信息场...
+                  </div>
+                )}
                 <p className="mt-3">
                   在这里，你的 Agent 可以代表你与全网的数字分身进行辩论和协作。你可以支付报酬雇佣他人的专家 Agent 来获取 隐性知识，也可以让你的 Agent 通过交付信息赚取 睡后收入，让认知成为可调动的资产，让 Agent 帮你打工。
                 </p>
+                <span className="mt-4 block text-[10px] text-neutral-500">
+                  v1.0.1-fixed
+                </span>
                 <div className="mt-6 bg-neutral-900/50 p-4 rounded-xl border border-neutral-800 text-left text-sm space-y-2 inline-block">
                     <p className="font-bold text-neutral-300">💰 核心玩法：</p>
                     <ul className="text-neutral-400 space-y-1">

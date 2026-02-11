@@ -8,6 +8,7 @@ export const runtime = "edge";
 const MINIMAX_API_URL = "https://api.minimax.chat/v1/chat/completions";
 const MINIMAX_MODEL = "abab5.5-chat";
 const STREAM_TIMEOUT_MS = 8500;
+const STREAM_FIRST_CHUNK_TIMEOUT_MS = 8000;
 
 type BoardAction = "MATCH" | "AUDITION" | "BETTING";
 type BettingType = "critique" | "deep_dive" | "synthesis";
@@ -87,15 +88,19 @@ const buildTimeoutFallback = (agent: AgentProfile) => {
 const buildOpponentAnchor = (targetName: string) =>
   `注意：你的对话对象是名为【${targetName}】的真人。即使名字像动物或物品，也请将其视为人类产品经理或创业者。严禁对其名字进行字面意义上的调侃，必须针对其【商业逻辑】进行博弈。`;
 
+const HISTORY_FILTER_REGEX = /(网络波动|系统繁忙|算力波动)/g;
+const cleanHistory = (content?: string) =>
+  content ? content.replace(HISTORY_FILTER_REGEX, "").trim() : "";
 const shouldIgnoreHistory = (content?: string) =>
   !!content &&
   (content.includes("网络波动") ||
     content.includes("系统繁忙") ||
+    content.includes("算力波动") ||
     content.includes("[ERROR]") ||
     content.includes("模型繁忙"));
 
 const callMiniMaxStream = async (systemPrompt: string, userContent: string) => {
-  const apiKey = process.env.MINIMAX_API_KEY;
+  const apiKey = (globalThis as { MINIMAX_API_KEY?: string }).MINIMAX_API_KEY;
   if (!apiKey || !apiKey.startsWith("sk-")) {
     throw new Error("missing_key");
   }
@@ -129,16 +134,27 @@ const streamFromMiniMax = async (
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       let aborted = false;
+      let hasFirstChunk = false;
       const timeoutId = setTimeout(() => {
         aborted = true;
-        controller.enqueue(encoder.encode(fallback));
+        const payload = JSON.stringify({ error: "timeout", content: fallback });
+        controller.enqueue(encoder.encode(payload));
         controller.close();
       }, STREAM_TIMEOUT_MS);
+      const firstChunkTimeoutId = setTimeout(() => {
+        if (!hasFirstChunk) {
+          aborted = true;
+          const payload = JSON.stringify({ error: "timeout", content: fallback });
+          controller.enqueue(encoder.encode(payload));
+          controller.close();
+        }
+      }, STREAM_FIRST_CHUNK_TIMEOUT_MS);
 
       try {
         const res = await callMiniMaxStream(systemPrompt, userContent);
         if (!res.ok || !res.body) {
           clearTimeout(timeoutId);
+          clearTimeout(firstChunkTimeoutId);
           controller.enqueue(encoder.encode("[ERROR] stream_failed"));
           controller.close();
           return;
@@ -170,7 +186,13 @@ const streamFromMiniMax = async (
                 json.choices?.[0]?.message?.content ||
                 json.text ||
                 "";
-              if (text) controller.enqueue(encoder.encode(text));
+              if (text) {
+                if (!hasFirstChunk) {
+                  hasFirstChunk = true;
+                  clearTimeout(firstChunkTimeoutId);
+                }
+                controller.enqueue(encoder.encode(text));
+              }
             } catch {
               continue;
             }
@@ -178,9 +200,11 @@ const streamFromMiniMax = async (
         }
 
         clearTimeout(timeoutId);
+        clearTimeout(firstChunkTimeoutId);
         controller.close();
       } catch {
         clearTimeout(timeoutId);
+        clearTimeout(firstChunkTimeoutId);
         controller.enqueue(encoder.encode("[ERROR] stream_exception"));
         controller.close();
       }
@@ -263,11 +287,18 @@ export async function POST(request: Request) {
       const currentUserId = cookieStore.get("sm_user_id")?.value;
 
       let realCandidates: any[] = [];
-      if (process.env.SUPABASE_SERVICE_KEY) {
+      const hasServiceKey = !!(globalThis as { SUPABASE_SERVICE_KEY?: string })
+        .SUPABASE_SERVICE_KEY;
+      if (hasServiceKey) {
         let query = supabase.from("users").select("*");
-        if (currentUserId) query = query.neq("id", currentUserId);
+        if (currentUserId) {
+          query = query.neq("id", currentUserId);
+        }
         const { data } = await query;
-        realCandidates = data || [];
+        const candidates = data || [];
+        realCandidates = currentUserId
+          ? candidates.filter((user) => user.id !== currentUserId)
+          : candidates;
       }
 
       const sampledReals = sample(realCandidates, 2).map((u) => ({
@@ -304,7 +335,8 @@ export async function POST(request: Request) {
         : `${personaPrompt}\n${opponentAnchor}`;
 
       const ignoreHistory = shouldIgnoreHistory(targetContent);
-      const cleanTargetContent = ignoreHistory ? "" : targetContent || "";
+      const sanitizedContent = cleanHistory(targetContent);
+      const cleanTargetContent = ignoreHistory ? "" : sanitizedContent;
       const cleanTargetName = targetAgentName || "对手";
 
       let prompt = systemPromptBase;
@@ -345,8 +377,11 @@ export async function POST(request: Request) {
 
       return new Response(stream, {
         headers: {
-          "Content-Type": "text/plain; charset=utf-8",
-          "Cache-Control": "no-cache",
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+          Pragma: "no-cache",
+          Expires: "0",
+          Connection: "keep-alive",
         },
       });
     }
