@@ -13,7 +13,7 @@ async function callMiniMax(systemPrompt: string, userContent: string, agentName:
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); 
+    const timeoutId = setTimeout(() => controller.abort(), 10000); 
 
     const res = await fetch(MINIMAX_API_URL, {
       method: "POST",
@@ -21,7 +21,7 @@ async function callMiniMax(systemPrompt: string, userContent: string, agentName:
       body: JSON.stringify({
         model: MINIMAX_MODEL,
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userContent }],
-        temperature: 0.8, max_tokens: 500
+        temperature: 0.7, max_tokens: 240
       }),
       signal: controller.signal
     });
@@ -35,14 +35,70 @@ async function callMiniMax(systemPrompt: string, userContent: string, agentName:
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { action, userContext, agentId, type, round, targetContent, targetAgentName, agentA, agentB } = body;
+    const {
+      action,
+      userContext,
+      agentId,
+      type,
+      round,
+      targetContent,
+      targetAgentName,
+      agentA,
+      agentB,
+      userName,
+      userShades,
+    } = body;
+
+    const buildShadesContext = (shades: any[] = []) =>
+      shades
+        .map(
+          (s: any) => `
+### 领域：${s.shadeName || s.shadeNamePublic || "未知"} (置信度: ${s.confidenceLevel || "UNKNOWN"})
+- **核心观点(Content)**: ${s.shadeContent || s.shadeContentPublic || "暂无细节"}
+- **深度描述**: ${s.shadeDescription || s.shadeDescriptionPublic || "暂无"}
+- **第三人称视角**: ${s.shadeContentThirdView || s.shadeContentThirdViewPublic || "无"}
+- **关联话题**: ${Array.isArray(s.sourceTopics) ? s.sourceTopics.join(", ") : ""}
+`
+        )
+        .join("\n---\n");
+
+    const buildRealSystemPrompt = (agentName: string, shades: any[] = []) => {
+      const shadesContext = buildShadesContext(shades);
+      return `
+你现在是真人用户【${agentName}】的数字分身。
+你不是 AI 助手，你是 ${agentName} 本人。你的知识体系和思维方式完全受限于以下【真实画像】：
+
+${shadesContext}
+
+【对话铁律】
+1. **引用事实**：你的观点必须源自上述“核心观点(Content)”或“深度描述”。如果画像里没提到的知识，尽量不要瞎编，或者表现得保守一点。
+2. **拒绝 AI 味**：要有活人感，禁止说“从资料来看”、“作为一个AI”。要用“我觉得”、“我之前关注过”这种口吻。
+3. **性格一致性**：如果画像里的置信度是 HIGH，你的语气要自信；如果是 LOW，要表现得犹豫或谦虚。
+4. **目标**：在辩论中击败对手，赢得玩家筹码。
+`.trim();
+    };
+
+    const sample = <T,>(list: T[], count: number) => {
+      const pool = [...list];
+      const result: T[] = [];
+      while (pool.length && result.length < count) {
+        const index = Math.floor(Math.random() * pool.length);
+        result.push(pool.splice(index, 1)[0]);
+      }
+      return result;
+    };
 
     // --- Helper: 查找 Agent ---
     const findAgent = async (id: string) => {
         if (id.startsWith('db_')) {
             const uid = id.replace('db_', '');
             const { data } = await supabase.from('users').select('*').eq('id', uid).single();
-            if (data) return { name: data.name, system_prompt: data.system_prompt };
+            if (data) {
+              return {
+                name: data.name,
+                system_prompt: buildRealSystemPrompt(data.name, data.shades || []),
+              };
+            }
         }
         if (id.startsWith('real_') || id === 'guest_user') {
             return { name: "我的分身", system_prompt: "你是用户的利益捍卫者。" };
@@ -55,62 +111,35 @@ export async function POST(request: Request) {
     // =========================================================================
     if (action === 'MATCH') {
       const cookieStore = await cookies();
-      const token = cookieStore.get("secondme_access_token")?.value;
-      
-      // 1. 获取当前登录者
-      let myAgent = { id: 'guest_user', name: '我 (Guest)', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Guest', shades: [], system_prompt: '', isReal: false };
-      let currentUserId = null;
+      const currentUserId = cookieStore.get("sm_user_id")?.value;
 
-      if (token) {
-        try {
-            const userRes = await fetch("https://api.mindos.com/u/v1/user/info", { headers: { "Authorization": token } });
-            if (userRes.ok) {
-                const u = (await userRes.json()).data;
-                currentUserId = u.user_id || u.id;
-                myAgent = {
-                    id: `real_${currentUserId}`, name: `${u.nickname} (我)`, avatar: u.avatar_url,
-                    shades: u.shades || [], system_prompt: `你是 ${u.nickname} 的数字分身。`, isReal: true
-                };
-            }
-        } catch(e) {}
-      }
-
-      // 2. 智能选人 (基于标签)
-      let boardAgents: any[] = [];
+      let realCandidates: any[] = [];
       if (process.env.SUPABASE_SERVICE_KEY) {
-          let query = supabase.from('users').select('*').order('last_seen', { ascending: false }).limit(50);
-          if (currentUserId) query = query.neq('id', currentUserId);
-          const { data: candidates } = await query;
-
-          if (candidates && candidates.length > 0) {
-              const PRIORITY_TAGS = ['AI', '产品', 'Product', '工程师', 'Engineer', '创业', 'Founder', '技术', 'Tech'];
-              const scoredCandidates = candidates.map(u => {
-                  let score = 0;
-                  const fullText = (JSON.stringify(u.shades || []) + " " + (u.system_prompt || "")).toLowerCase();
-                  PRIORITY_TAGS.forEach(tag => { if (fullText.includes(tag.toLowerCase())) score += 10; });
-                  if (userContext) {
-                      const keywords = userContext.slice(0, 50).toLowerCase();
-                      if (fullText.includes(keywords)) score += 5;
-                  }
-                  return { ...u, matchScore: score };
-              });
-              scoredCandidates.sort((a, b) => b.matchScore - a.matchScore);
-              boardAgents = scoredCandidates.slice(0, 3).map(u => ({
-                  id: `db_${u.id}`, name: u.name, avatar: u.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.name}`,
-                  shades: u.shades || [], system_prompt: u.system_prompt
-              }));
-          }
+        let query = supabase.from('users').select('*');
+        if (currentUserId) query = query.neq('id', currentUserId);
+        const { data } = await query;
+        realCandidates = data || [];
       }
 
-      // 3. NPC 补位 (Steve, Woz, Kevin)
+      const sampledReals = sample(realCandidates, 2).map((u) => ({
+        id: `db_${u.id}`,
+        name: u.name,
+        avatar: u.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.name}`,
+        shades: u.shades || [],
+        system_prompt: buildRealSystemPrompt(u.name, u.shades || []),
+        isRealUser: true,
+      }));
+
+      const randomNpc = sample(mockAgents, 1);
+      let boardAgents = [...sampledReals, ...randomNpc];
+
       if (boardAgents.length < 3) {
-          const needed = 3 - boardAgents.length;
-          const priorityNPCs = ['steve-product-tyrant', 'woz-tech-pessimist', 'kevin-greedy-vc'];
-          const backupNPCs = mockAgents.filter(a => priorityNPCs.includes(a.id)).sort((a, b) => priorityNPCs.indexOf(a.id) - priorityNPCs.indexOf(b.id));
-          boardAgents = [...boardAgents, ...backupNPCs.slice(0, needed)];
+        const needed = 3 - boardAgents.length;
+        const fallback = sample(mockAgents, needed);
+        boardAgents = [...boardAgents, ...fallback];
       }
 
-      return NextResponse.json({ agents: [...boardAgents, myAgent] });
+      return NextResponse.json({ agents: boardAgents });
     }
 
     // =========================================================================
@@ -119,7 +148,15 @@ export async function POST(request: Request) {
     if (action === 'AUDITION' || action === 'BETTING') {
         const targetAgent = await findAgent(agentId) || { name: "Agent", system_prompt: "" };
         let prompt = "";
-        const styleGuide = `【格式铁律】：1. 严禁使用 Markdown 星号 (*, **)。2. 严禁使用分点列表。3. 请输出一段完整的自然段落。4. 字数严格控制在 150 字以内。`;
+        const styleGuide = `【格式铁律】：1. 严禁使用 Markdown 星号 (*, **)。2. 严禁使用分点列表。3. 请输出一段完整的自然段落。4. 字数严格控制在 200 字以内。`;
+        const normalizedUserShades = Array.isArray(userShades)
+          ? userShades
+          : typeof userShades === "string"
+          ? userShades.split(",").map((item: string) => item.trim()).filter(Boolean)
+          : [];
+        const personaLine = normalizedUserShades.length
+          ? buildRealSystemPrompt(userName || "用户", normalizedUserShades as any[])
+          : "";
 
         // --- 存钱逻辑 (仅 BETTING) ---
         if (action === 'BETTING') {
@@ -143,22 +180,38 @@ export async function POST(request: Request) {
 
         // --- Prompt 逻辑 ---
         if (action === 'AUDITION') {
-            if (round === 1) prompt = `${targetAgent.system_prompt}\n${styleGuide}\n【任务】：Round 1 - 建设性方案。\n【用户背景】：${userContext}\n请直接给出一个核心建议。`;
-            else if (round === 2) prompt = `${targetAgent.system_prompt}\n${styleGuide}\n【任务】：Round 2 - 批判性攻击。\n【对象】：${targetAgentName}\n【观点】："${targetContent}"\n请直接回怼。`;
+            if (round === 1) prompt = `${targetAgent.system_prompt}\n${personaLine}\n${styleGuide}\n【任务】：Round 1 - 建设性方案。\n【用户背景】：${userContext}\n请直接给出一个核心建议。`;
+            else if (round === 2) prompt = `${targetAgent.system_prompt}\n${personaLine}\n${styleGuide}\n【任务】：Round 2 - 批判性攻击。\n【对象】：${targetAgentName}\n【观点】："${targetContent}"\n请直接回怼。`;
         } else {
             if (type === 'synthesis') {
                  const agentAObj = await findAgent(agentA);
                  const agentBObj = await findAgent(agentB);
-                 prompt = `高级决策顾问任务：融合 ${agentAObj?.name} 和 ${agentBObj?.name} 的观点。\n【要求】：1. 开头必须是"结合了双方讨论的内容，因此建议这样执行：" 2. 严禁星号。3. 字数300字内。`;
+                 prompt = `高级决策顾问任务：融合 ${agentAObj?.name} 和 ${agentBObj?.name} 的观点。\n${personaLine}\n【要求】：开头必须是"结合了双方讨论的内容，因此建议这样执行：" 严禁星号。字数200字内。`;
             } else if (type === 'deep_dive') {
-                 prompt = `${targetAgent.system_prompt}\n用户付费深挖。\n要求：给出执行步骤，字数300字内，严禁星号。`;
+                 prompt = `${targetAgent.system_prompt}\n${personaLine}\n用户付费深挖。\n要求：给出执行步骤，字数200字内，严禁星号。`;
             } else {
-                 prompt = `${targetAgent.system_prompt}\n用户付费加大火力。\n要求：犀利指出弱点，字数100字内，严禁星号。`;
+                 prompt = `${targetAgent.system_prompt}\n${personaLine}\n用户付费加大火力。\n要求：犀利指出弱点，字数100字内，严禁星号。`;
             }
         }
         
-        const reply = await callMiniMax(prompt, "请输出。", targetAgent.name || "Agent");
-        return NextResponse.json(reply);
+        try {
+          const reply = await callMiniMax(prompt, "请输出。", targetAgent.name || "Agent");
+          if (
+            reply.includes("网络超时") ||
+            reply.includes("思考中断") ||
+            reply.includes("配置错误")
+          ) {
+            if (type === "synthesis") {
+              return NextResponse.json("两位大佬正在激烈讨论，暂时无法达成一致...");
+            }
+          }
+          return NextResponse.json(reply);
+        } catch (error) {
+          if (type === "synthesis") {
+            return NextResponse.json("两位大佬正在激烈讨论，暂时无法达成一致...");
+          }
+          return NextResponse.json("[AI 暂时不可用]");
+        }
     }
 
     return NextResponse.json({ error: 'Unknown action' });

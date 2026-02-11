@@ -82,8 +82,12 @@ export async function GET(request: Request) {
     
     // 核心：设置头像和名字的 Cookie (前端直接读这个)
     // 注意：名字用 encodeURIComponent 避免中文乱码
+    const userId = u.userId || u.id || u.user_id;
     response.cookies.set("sm_name", encodeURIComponent(u.name || "User"), { path: '/', maxAge: 86400 });
     response.cookies.set("sm_avatar", u.avatar || "", { path: '/', maxAge: 86400 });
+    if (userId) {
+      response.cookies.set("sm_user_id", String(userId), { path: '/', maxAge: 86400 });
+    }
     response.cookies.set("secondme_token", accessToken, { httpOnly: true, path: '/' });
 
     return response;

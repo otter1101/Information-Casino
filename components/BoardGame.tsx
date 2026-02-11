@@ -15,6 +15,13 @@ type Message = {
 
 type BetForm = { target: string; assets: string; risks: string; };
 
+type UserProfile = {
+  id: string;
+  name: string;
+  avatar: string;
+  shades: string[];
+};
+
 export default function BoardGame() {
   // --- 状态管理 ---
   const [form, setForm] = useState<BetForm>({ target: "", assets: "", risks: "" });
@@ -28,6 +35,7 @@ export default function BoardGame() {
   const [deepDiveContent, setDeepDiveContent] = useState<{title: string, content: string} | null>(null);
   const [showIntro, setShowIntro] = useState(false);
   const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const [totalUsers, setTotalUsers] = useState(0);
   const [leaderboardData, setLeaderboardData] = useState<any[]>([]); 
   const [paidInsightsMap, setPaidInsightsMap] = useState<Record<string, string>>({});
   const [selectedForSynthesis, setSelectedForSynthesis] = useState<string[]>([]);
@@ -35,8 +43,15 @@ export default function BoardGame() {
   
   // ✅ 新增：用户信息状态 (名字和头像)
   const [userInfo, setUserInfo] = useState<{name: string, avatar: string} | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const readCookie = (name: string) => {
+    if (typeof document === "undefined") return "";
+    const match = document.cookie.match(new RegExp(`(^| )${name}=([^;]+)`));
+    return match ? decodeURIComponent(match[2]) : "";
+  };
   
   // --- 1. 核心登录逻辑 (OAuth) ---
   const handleLogin = () => {
@@ -65,20 +80,58 @@ export default function BoardGame() {
   // --- 2. 初始化检查 (读取 Cookie + 恢复状态) ---
   useEffect(() => {
      // ✅ 核心修改：从 Cookie 读取后端写入的用户信息
-     const getCookie = (name: string) => {
-        if (typeof document === 'undefined') return null;
-        const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
-        if (match) return decodeURIComponent(match[2]);
-        return null;
-     };
-
-     const name = getCookie("sm_name");
-     const avatar = getCookie("sm_avatar");
+     const name = readCookie("sm_name");
+     const avatar = readCookie("sm_avatar");
+     const userId = readCookie("sm_user_id");
      
      // 如果 Cookie 里有头像，直接设置状态 -> 界面就会显示头像！
      if (name && avatar) {
          setUserInfo({ name, avatar });
      }
+     if (userId) {
+         setUserProfile(prev => ({
+           id: userId,
+           name: name || prev?.name || "",
+           avatar: avatar || prev?.avatar || "",
+           shades: prev?.shades || []
+         }));
+     }
+
+     const fetchWealth = async () => {
+        const query = supabase
+          .from("users")
+          .select("wealth, shades, name, avatar, id");
+        const { data, error } = userId
+          ? await query.eq("id", userId).single()
+          : await query.eq("name", name || "").single();
+        if (!error && data) {
+          if (typeof data.wealth === "number") setUserChips(data.wealth);
+          setUserProfile({
+            id: (data.id as string) || userId || "",
+            name: (data.name as string) || name || "",
+            avatar: (data.avatar as string) || avatar || "",
+            shades: (data.shades as string[]) || []
+          });
+          if (data.name && data.avatar) {
+            setUserInfo({ name: data.name as string, avatar: data.avatar as string });
+          }
+        }
+     };
+
+     if (name) {
+        fetchWealth().catch(() => {});
+     }
+
+     const fetchTotalUsers = async () => {
+        const { count } = await supabase
+          .from("users")
+          .select("id", { count: "exact", head: true });
+        if (typeof count === "number") {
+          setTotalUsers(count);
+        }
+     };
+
+     fetchTotalUsers().catch(() => {});
      
      // 恢复游戏进度
      const saved = localStorage.getItem("casino_v11");
@@ -94,6 +147,7 @@ export default function BoardGame() {
         setPaidInsightsMap(data.paidInsightsMap || {});
         // 如果 localStorage 里有旧的 userInfo 也恢复一下
         if (data.userInfo) setUserInfo(data.userInfo);
+        if (data.userProfile) setUserProfile(data.userProfile);
       } catch(e) {}
     }
   }, []);
@@ -102,10 +156,10 @@ export default function BoardGame() {
   useEffect(() => {
     if (gameStarted) {
       localStorage.setItem("casino_v11", JSON.stringify({ 
-        form, gameStarted, agents, msgMap, userChips, synthesisResult, paidInsightsMap, userInfo
+        form, gameStarted, agents, msgMap, userChips, synthesisResult, paidInsightsMap, userInfo, userProfile
       }));
     }
-  }, [form, gameStarted, agents, msgMap, userChips, synthesisResult, paidInsightsMap, userInfo]);
+  }, [form, gameStarted, agents, msgMap, userChips, synthesisResult, paidInsightsMap, userInfo, userProfile]);
 
   // --- 4. 排行榜加载 ---
   useEffect(() => {
@@ -152,13 +206,33 @@ export default function BoardGame() {
       const data = await res.json();
       const boardAgents = Array.isArray(data.agents) ? data.agents : [];
       if (boardAgents.length === 0) throw new Error("No agents found");
+      const smName = (userProfile?.name || userInfo?.name || "").trim();
+      const smAvatar = userProfile?.avatar || userInfo?.avatar || "";
+      const smUserId = userProfile?.id;
+      const userShades = userProfile?.shades || [];
+      if (smName) {
+        boardAgents[0] = {
+          id: smUserId ? `real_${smUserId}` : "real_user",
+          name: smName,
+          avatar: smAvatar || "https://api.dicebear.com/7.x/avataaars/svg?seed=Me",
+          shades: userShades,
+          system_prompt: `你是 ${smName} 的数字分身。你的核心特质/标签是：${userShades.join("、") || "综合"}。请务必基于这些特质进行回答，展现真人的个性。`,
+        };
+      }
       setAgents(boardAgents);
 
       // Round 1
       await Promise.all(boardAgents.map(async (agent: MockAgent) => {
         const r1Res = await fetch("/api/board", {
           method: "POST",
-          body: JSON.stringify({ action: "AUDITION", agentId: agent.id, round: 1, userContext: fullContext }),
+          body: JSON.stringify({
+            action: "AUDITION",
+            agentId: agent.id,
+            round: 1,
+            userContext: fullContext,
+            userName: smName,
+            userShades,
+          }),
         });
         const content = await r1Res.text();
         addMessage(agent.id, { agentId: agent.id, agentName: agent.name, content, round: 1 });
@@ -174,18 +248,20 @@ export default function BoardGame() {
 
       for (const pair of attackPairs) {
         if (!pair.victimId || !pair.attackerId) continue;
-        const victimName = agents.find(a => a.id === pair.victimId)?.name;
+        const victimName = boardAgents.find((a: MockAgent) => a.id === pair.victimId)?.name;
         const previousView = msgMap[pair.victimId]?.[0]?.content || "无观点";
         
         const res = await fetch("/api/board", {
           method: "POST",
           body: JSON.stringify({ 
             action: "AUDITION", agentId: pair.attackerId, round: 2, 
-            targetAgentName: victimName, targetContent: previousView, userContext: fullContext
+            targetAgentName: victimName, targetContent: previousView, userContext: fullContext,
+            userName: smName,
+            userShades,
           }),
         });
         addMessage(pair.attackerId, { 
-          agentId: pair.attackerId, agentName: agents.find(a => a.id === pair.attackerId)?.name || "", 
+          agentId: pair.attackerId, agentName: boardAgents.find((a: MockAgent) => a.id === pair.attackerId)?.name || "", 
           content: await res.text(), round: 2 
         });
         await new Promise(r => setTimeout(r, 500));
@@ -200,9 +276,12 @@ export default function BoardGame() {
     const cost = costs[type];
     if (userChips < cost) { alert("筹码不足！"); return; }
     
-    setUserChips(prev => prev - cost);
+    const nextWealth = userChips - cost;
+    setUserChips(nextWealth);
     setLoadingAction({ type, id: agentId || 'sys' });
     const fullContext = `目标:${form.target}\n资源:${form.assets}\n顾虑:${form.risks}`;
+    const userName = userProfile?.name || userInfo?.name || "";
+    const userShades = userProfile?.shades || [];
 
     try {
       if (type === 'synthesis') {
@@ -210,7 +289,13 @@ export default function BoardGame() {
          const res = await fetch("/api/board", {
             method: "POST",
             body: JSON.stringify({ 
-              action: "BETTING", type, agentA: selectedForSynthesis[0], agentB: selectedForSynthesis[1], userContext: fullContext 
+              action: "BETTING",
+              type,
+              agentA: selectedForSynthesis[0],
+              agentB: selectedForSynthesis[1],
+              userContext: fullContext,
+              userName,
+              userShades,
             }),
          });
          const result = await res.text();
@@ -220,7 +305,14 @@ export default function BoardGame() {
       } else if (agentId) {
          const res = await fetch("/api/board", {
             method: "POST",
-            body: JSON.stringify({ action: "BETTING", type, agentId, userContext: fullContext }),
+            body: JSON.stringify({
+              action: "BETTING",
+              type,
+              agentId,
+              userContext: fullContext,
+              userName,
+              userShades,
+            }),
          });
          const text = await res.text();
          if (type === 'deep_dive') {
@@ -232,7 +324,13 @@ export default function BoardGame() {
          }
       }
     } catch (e) { console.error(e); }
-    finally { setLoadingAction(null); }
+    finally {
+      const updateId = userProfile?.id || readCookie("sm_user_id");
+      if (updateId) {
+        await supabase.from("users").update({ wealth: nextWealth }).eq("id", updateId);
+      }
+      setLoadingAction(null);
+    }
   };
 
   const toggleSynthesisSelect = (e: React.MouseEvent, id: string) => {
@@ -265,6 +363,9 @@ export default function BoardGame() {
                 Information Casino <span className="text-4xl text-amber-700 font-normal ml-0 md:ml-4 tracking-normal">| 知识赌场</span>
               </h1>
               <div className="text-neutral-400 text-lg leading-relaxed max-w-2xl mx-auto font-light">
+                <p className="text-sm text-amber-400 tracking-wide">
+                  🔥 已有 <span className="text-amber-300 font-semibold">{totalUsers}</span> 位数字分身正在博弈
+                </p>
                 <p>在这里，你的 Agent 可以代表你与全网的数字分身进行辩论和协作。让认知成为可调动的资产。</p>
                 <div className="mt-6 bg-neutral-900/50 p-4 rounded-xl border border-neutral-800 text-left text-sm space-y-2 inline-block">
                     <p className="font-bold text-neutral-300">💰 核心玩法：</p>
