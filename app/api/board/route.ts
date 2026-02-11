@@ -301,22 +301,33 @@ export async function POST(request: Request) {
           : candidates;
       }
 
-      const sampledReals = sample(realCandidates, 2).map((u) => ({
-        id: `db_${u.id}`,
-        name: u.name,
-        avatar: u.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.name}`,
-        shades: u.shades || [],
-        system_prompt: buildPersonaPrompt(safeDecode(u.name || "用户"), u.shades || []),
-        isRealUser: true,
-      }));
+      const isSelf = (id: string) =>
+        !!currentUserId && (id === currentUserId || id === `db_${currentUserId}`);
 
-      const randomNpc = sample(mockAgents, 1).map((npc) => ({ ...npc, isNPC: true }));
-      let boardAgents = [...sampledReals, ...randomNpc];
+      const buildMatch = () => {
+        const sampledReals = sample(realCandidates, 2).map((u) => ({
+          id: `db_${u.id}`,
+          name: u.name,
+          avatar: u.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.name}`,
+          shades: u.shades || [],
+          system_prompt: buildPersonaPrompt(safeDecode(u.name || "用户"), u.shades || []),
+          isRealUser: true,
+        }));
 
-      if (boardAgents.length < 3) {
-        const needed = 3 - boardAgents.length;
-        const fallback = sample(mockAgents, needed).map((npc) => ({ ...npc, isNPC: true }));
-        boardAgents = [...boardAgents, ...fallback];
+        const randomNpc = sample(mockAgents, 1).map((npc) => ({ ...npc, isNPC: true }));
+        let boardAgents = [...sampledReals, ...randomNpc];
+
+        if (boardAgents.length < 3) {
+          const needed = 3 - boardAgents.length;
+          const fallback = sample(mockAgents, needed).map((npc) => ({ ...npc, isNPC: true }));
+          boardAgents = [...boardAgents, ...fallback];
+        }
+        return boardAgents;
+      };
+
+      let boardAgents = buildMatch();
+      if (currentUserId && boardAgents.some((agent) => isSelf(agent.id))) {
+        boardAgents = buildMatch();
       }
 
       return NextResponse.json({ agents: boardAgents });
@@ -333,6 +344,8 @@ export async function POST(request: Request) {
       const systemPromptBase = targetAgent.isNPC
         ? `${targetAgent.context}\n${opponentAnchor}`
         : `${personaPrompt}\n${opponentAnchor}`;
+      const biasNote =
+        "禁止使用 AI 常用套话，必须根据你的背景给出具体、尖锐且带有主观偏见的判断。";
 
       const ignoreHistory = shouldIgnoreHistory(targetContent);
       const sanitizedContent = cleanHistory(targetContent);
@@ -342,23 +355,23 @@ export async function POST(request: Request) {
       let prompt = systemPromptBase;
       if (action === "AUDITION") {
         if (round === 1) {
-          prompt = `${systemPromptBase}\n【任务】：Round 1 - 建设性方案。\n【用户背景】：${userContext}\n请直接给出一个核心建议。`;
+          prompt = `${systemPromptBase}\n【任务】：Round 1 - 建设性方案。\n【用户背景】：${userContext}\n请直接给出一个核心建议。\n${biasNote}`;
         } else if (round === 2) {
           const historyNote = ignoreHistory
             ? "前序内容疑似兜底话术，忽略前序，直接针对用户目标独立评论。"
             : "";
-          prompt = `${systemPromptBase}\n${historyNote}\n【任务】：Round 2 - 批判性攻击。\n【对象】：${cleanTargetName}\n【观点】："${cleanTargetContent}"\n请直接回怼。`;
+          prompt = `${systemPromptBase}\n${historyNote}\n【任务】：Round 2 - 批判性攻击。\n【对象】：${cleanTargetName}\n【观点】："${cleanTargetContent}"\n请直接回怼。\n${biasNote}`;
         }
       } else if (type === "synthesis") {
         const [agentAProfile, agentBProfile] = await Promise.all([
           getAgentById(agentA || ""),
           getAgentById(agentB || ""),
         ]);
-        prompt = `${systemPromptBase}\n融合 ${agentAProfile.name} 和 ${agentBProfile.name} 的观点。请用100字以内总结两个 Agent 的观点，只输出结论，不要分析过程。`;
+        prompt = `${systemPromptBase}\n融合 ${agentAProfile.name} 和 ${agentBProfile.name} 的观点。请用100字以内总结两个 Agent 的观点，只输出结论，不要分析过程。\n${biasNote}`;
       } else if (type === "deep_dive") {
-        prompt = `${systemPromptBase}\n用户付费深挖。请给出执行步骤，120字以内。`;
+        prompt = `${systemPromptBase}\n用户付费深挖。请给出执行步骤，120字以内。\n${biasNote}`;
       } else {
-        prompt = `${systemPromptBase}\n用户付费加大火力。请犀利指出弱点，100字以内。`;
+        prompt = `${systemPromptBase}\n用户付费加大火力。请犀利指出弱点，100字以内。\n${biasNote}`;
       }
 
       const richContext = buildRichContext(shadesForPersona);
@@ -377,11 +390,10 @@ export async function POST(request: Request) {
 
       return new Response(stream, {
         headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-          Pragma: "no-cache",
-          Expires: "0",
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
           Connection: "keep-alive",
+          "X-Content-Type-Options": "nosniff",
         },
       });
     }

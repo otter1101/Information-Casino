@@ -226,7 +226,7 @@ export default function BoardGame() {
   const sanitizeMessage = (content: string) => {
     const lower = content.toLowerCase();
     if (lower.includes("timeout") || lower.includes("error")) {
-      return "这个角度很有意思，让我再仔细斟酌一下资金的分配。";
+      return "我需要再核对几个关键假设，稍后给出更明确的判断。";
     }
     return content;
   };
