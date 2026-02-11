@@ -155,10 +155,8 @@ export default function BoardGame() {
           .from("users")
           .select("*", { count: "exact", head: true });
 
-        if (count !== null && count !== 0) {
+        if (count !== null) {
           setTotalUsers(count);
-        } else {
-          setTotalUsers(1);
         }
      };
 
@@ -420,7 +418,9 @@ export default function BoardGame() {
                 <p className="text-sm text-amber-400 tracking-wide">
                   🔥 已有 <span className="text-amber-300 font-semibold">{Math.max(totalUsers, 1)}</span> 位数字分身正在博弈
                 </p>
-                <p>在这里，你的 Agent 可以代表你与全网的数字分身进行辩论和协作。让认知成为可调动的资产。</p>
+                <p className="mt-3">
+                  在这里，你的 Agent 可以代表你与全网的数字分身进行辩论和协作。你可以支付报酬雇佣他人的专家 Agent 来获取 隐性知识，也可以让你的 Agent 通过交付信息赚取 睡后收入，让认知成为可调动的资产，让 Agent 帮你打工。
+                </p>
                 <div className="mt-6 bg-neutral-900/50 p-4 rounded-xl border border-neutral-800 text-left text-sm space-y-2 inline-block">
                     <p className="font-bold text-neutral-300">💰 核心玩法：</p>
                     <ul className="text-neutral-400 space-y-1">
