@@ -33,7 +33,7 @@ export default function BoardGame() {
   const [selectedForSynthesis, setSelectedForSynthesis] = useState<string[]>([]);
   const [synthesisResult, setSynthesisResult] = useState<string | null>(null);
   
-  // 新增：用户信息状态
+  // ✅ 新增：用户信息状态 (名字和头像)
   const [userInfo, setUserInfo] = useState<{name: string, avatar: string} | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -45,7 +45,6 @@ export default function BoardGame() {
         alert("请检查环境变量 NEXT_PUBLIC_CLIENT_ID 是否配置！");
         return;
     }
-    // 自动适配：本地开发用 localhost，线上用 vercel 域名
     const origin = window.location.origin;
     const redirectUri = `${origin}/api/auth/callback`;
     const state = Math.random().toString(36).substring(7);
@@ -63,15 +62,25 @@ export default function BoardGame() {
     window.location.href = `https://go.second.me/oauth/?${params.toString()}`;
   };
 
-  // --- 2. 初始化检查 (看用户是否已登录) ---
+  // --- 2. 初始化检查 (读取 Cookie + 恢复状态) ---
   useEffect(() => {
-     const checkLogin = async () => {
-         // 这里简单通过 cookie 或 supabase 检查 (简化版：如果 url 带 code 视为登录中)
-         // 实际项目中可以调用一个 /api/me 接口，这里为了省事，我们直接看 url 有没有被重定向回来
-         // 或者检查本地存储
+     // ✅ 核心修改：从 Cookie 读取后端写入的用户信息
+     const getCookie = (name: string) => {
+        if (typeof document === 'undefined') return null;
+        const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+        if (match) return decodeURIComponent(match[2]);
+        return null;
      };
+
+     const name = getCookie("sm_name");
+     const avatar = getCookie("sm_avatar");
      
-     // 恢复游戏状态
+     // 如果 Cookie 里有头像，直接设置状态 -> 界面就会显示头像！
+     if (name && avatar) {
+         setUserInfo({ name, avatar });
+     }
+     
+     // 恢复游戏进度
      const saved = localStorage.getItem("casino_v11");
      if (saved) {
       try {
@@ -83,7 +92,8 @@ export default function BoardGame() {
         setUserChips(data.userChips || 100); 
         setSynthesisResult(data.synthesisResult || null);
         setPaidInsightsMap(data.paidInsightsMap || {});
-        setUserInfo(data.userInfo || null);
+        // 如果 localStorage 里有旧的 userInfo 也恢复一下
+        if (data.userInfo) setUserInfo(data.userInfo);
       } catch(e) {}
     }
   }, []);
@@ -244,7 +254,7 @@ export default function BoardGame() {
 
   // === 界面渲染 ===
 
-  // 1. Landing Page (首页) - 恢复为带表单的界面！
+  // 1. Landing Page (首页)
   if (!gameStarted) {
     return (
         <div className="min-h-screen bg-neutral-950 text-white flex flex-col items-center justify-center p-4">
@@ -267,14 +277,24 @@ export default function BoardGame() {
               </div>
             </div>
             
-            {/* Form Area - 终于回来了！ */}
+            {/* Form Area */}
             <div className="bg-neutral-900 p-8 rounded-2xl border border-neutral-800 space-y-6 shadow-2xl relative">
               
-              {/* 登录按钮放在这里，显眼但不突兀 */}
+              {/* ✅ 核心修改：右上角状态栏 */}
               <div className="absolute top-4 right-4">
-                  <button onClick={handleLogin} className="text-xs text-amber-600 hover:text-amber-500 underline flex items-center gap-1 bg-neutral-800 px-3 py-1 rounded-full border border-amber-900/30">
-                     🔗 连接我的数字分身
-                  </button>
+                  {userInfo ? (
+                      // 如果已登录，显示头像和名字
+                      <div className="flex items-center gap-2 bg-neutral-800 px-3 py-1 rounded-full border border-amber-500/50 shadow-lg">
+                          <img src={userInfo.avatar} className="w-6 h-6 rounded-full border border-amber-500" />
+                          <span className="text-xs text-amber-500 font-bold">{userInfo.name}</span>
+                          <span className="text-[10px] text-green-500">● 已连接</span>
+                      </div>
+                  ) : (
+                      // 如果未登录，显示连接按钮
+                      <button onClick={handleLogin} className="text-xs text-amber-600 hover:text-amber-500 underline flex items-center gap-1 bg-neutral-800 px-3 py-1 rounded-full border border-amber-900/30">
+                         🔗 连接我的数字分身
+                      </button>
+                  )}
               </div>
 
               <div>
@@ -323,10 +343,18 @@ export default function BoardGame() {
             <button onClick={() => setShowIntro(true)} className="ml-2 w-6 h-6 rounded-full border border-neutral-600 text-neutral-400 flex items-center justify-center text-xs hover:border-amber-500 hover:text-amber-500 transition-colors">?</button>
         </div>
         <div className="flex items-center gap-4">
-            {/* 登录按钮 (常驻) */}
-            <button onClick={handleLogin} className="bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs px-3 py-1.5 rounded-full transition-colors border border-neutral-700">
-                🔗 连接分身
-            </button>
+            
+            {/* ✅ 核心修改：Navbar 里的头像显示 */}
+            {userInfo ? (
+                <div className="flex items-center gap-2" title={userInfo.name}>
+                    <img src={userInfo.avatar} className="w-6 h-6 rounded-full border border-amber-500" />
+                </div>
+            ) : (
+                <button onClick={handleLogin} className="bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs px-3 py-1.5 rounded-full transition-colors border border-neutral-700">
+                    🔗 连接分身
+                </button>
+            )}
+
             <button onClick={resetGame} className="text-xs text-neutral-500 hover:text-white underline">重置</button>
             <div className="flex items-center gap-2 bg-neutral-800 px-4 py-1.5 rounded-full border border-amber-500/30">
                 <span className="text-amber-400">🪙</span>
@@ -344,6 +372,7 @@ export default function BoardGame() {
         <div className="mb-8">
             <div className="flex flex-col md:flex-row gap-4 items-start">
                 <div className="w-12 h-12 rounded-full bg-gradient-to-br from-amber-500 to-amber-700 flex items-center justify-center text-white font-bold text-lg shrink-0 border-2 border-neutral-800 shadow-xl">
+                    {/* 显示真实头像，没有就显示 Me */}
                     {userInfo ? <img src={userInfo.avatar} className="w-full h-full rounded-full"/> : "Me"}
                 </div>
                 <div className="flex-1 bg-neutral-900 border border-neutral-800 rounded-2xl p-5 shadow-2xl relative">
