@@ -77,12 +77,14 @@ const getFirstShadeName = (shades: any[] = []) => {
   return first.shadeName || first.shadeNamePublic || first.name || "技术";
 };
 
-const buildTimeoutFallback = (agent: AgentProfile) => {
+const buildTimeoutFallback = (agent: {
+  name: string;
+  isNPC?: boolean;
+  shades?: string[];
+}) => {
+  const identity = agent.isNPC ? "NPC" : "REAL";
   const firstShadeName = getFirstShadeName(agent.shades || []);
-  if (agent.isNPC) {
-    return "（系统繁忙）简而言之，哪怕从风控角度看，这个方案的风险/收益比也需要重新计算。";
-  }
-  return `（网络波动）从${firstShadeName}底层逻辑看，这个方案的扩展性还需要再测算一下。`;
+  return `[ERROR] ${agent.name}(${identity}) generation_failed: no response. hint=${firstShadeName}`;
 };
 
 const buildOpponentAnchor = (targetName: string) =>
@@ -155,7 +157,7 @@ const streamFromMiniMax = async (
         if (!res.ok || !res.body) {
           clearTimeout(timeoutId);
           clearTimeout(firstChunkTimeoutId);
-          controller.enqueue(encoder.encode("[ERROR] stream_failed"));
+          controller.enqueue(encoder.encode(fallback));
           controller.close();
           return;
         }
@@ -205,7 +207,7 @@ const streamFromMiniMax = async (
       } catch {
         clearTimeout(timeoutId);
         clearTimeout(firstChunkTimeoutId);
-        controller.enqueue(encoder.encode("[ERROR] stream_exception"));
+        controller.enqueue(encoder.encode(fallback));
         controller.close();
       }
     },
@@ -329,11 +331,56 @@ export async function POST(request: Request) {
       if (currentUserId && boardAgents.some((agent) => isSelf(agent.id))) {
         boardAgents = buildMatch();
       }
+      if (currentUserId && boardAgents.some((agent) => agent.id === currentUserId)) {
+        throw new Error("Self-match detected");
+      }
 
       return NextResponse.json({ agents: boardAgents });
     }
 
     if (action === "AUDITION" || action === "BETTING") {
+      const biasNote =
+        "禁止使用 AI 常用套话，必须根据你的背景给出具体、尖锐且带有主观偏见的判断。";
+
+      if (action === "BETTING" && type === "synthesis") {
+        const [agentAProfile, agentBProfile] = await Promise.all([
+          getAgentById(agentA || ""),
+          getAgentById(agentB || ""),
+        ]);
+        const agentAPrompt = buildPersonaPrompt(
+          safeDecode(agentAProfile.name),
+          agentAProfile.shades || []
+        );
+        const agentBPrompt = buildPersonaPrompt(
+          safeDecode(agentBProfile.name),
+          agentBProfile.shades || []
+        );
+        const synthesisPrompt = `【用户背景】：${userContext}
+【角色A】${agentAProfile.name}
+画像：${agentAPrompt}
+【角色B】${agentBProfile.name}
+画像：${agentBPrompt}
+请用100字以内总结两个 Agent 的观点，只输出结论，不要分析过程。
+${biasNote}`;
+
+        const agentAIdentity = agentAProfile.isNPC ? "NPC" : "REAL";
+        const agentBIdentity = agentBProfile.isNPC ? "NPC" : "REAL";
+        const fallbackResponse = `[ERROR] ${agentAProfile.name}(${agentAIdentity}) + ${agentBProfile.name}(${agentBIdentity}) generation_failed: no response.`;
+
+        const stream = await streamFromMiniMax(
+          synthesisPrompt,
+          userContext,
+          fallbackResponse
+        );
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            Connection: "keep-alive",
+          },
+        });
+      }
+
       const targetAgent = await getAgentById(agentId);
       const shadesForPersona =
         userShades && userShades.length > 0 ? userShades : targetAgent.shades || [];
@@ -344,8 +391,6 @@ export async function POST(request: Request) {
       const systemPromptBase = targetAgent.isNPC
         ? `${targetAgent.context}\n${opponentAnchor}`
         : `${personaPrompt}\n${opponentAnchor}`;
-      const biasNote =
-        "禁止使用 AI 常用套话，必须根据你的背景给出具体、尖锐且带有主观偏见的判断。";
 
       const ignoreHistory = shouldIgnoreHistory(targetContent);
       const sanitizedContent = cleanHistory(targetContent);
@@ -362,12 +407,6 @@ export async function POST(request: Request) {
             : "";
           prompt = `${systemPromptBase}\n${historyNote}\n【任务】：Round 2 - 批判性攻击。\n【对象】：${cleanTargetName}\n【观点】："${cleanTargetContent}"\n请直接回怼。\n${biasNote}`;
         }
-      } else if (type === "synthesis") {
-        const [agentAProfile, agentBProfile] = await Promise.all([
-          getAgentById(agentA || ""),
-          getAgentById(agentB || ""),
-        ]);
-        prompt = `${systemPromptBase}\n融合 ${agentAProfile.name} 和 ${agentBProfile.name} 的观点。请用100字以内总结两个 Agent 的观点，只输出结论，不要分析过程。\n${biasNote}`;
       } else if (type === "deep_dive") {
         prompt = `${systemPromptBase}\n用户付费深挖。请给出执行步骤，120字以内。\n${biasNote}`;
       } else {
@@ -378,7 +417,8 @@ export async function POST(request: Request) {
       console.log("Rich Context Length:", richContext.length);
 
       const fallbackResponse = buildTimeoutFallback({
-        ...targetAgent,
+        name: safeDecode(targetAgent.name),
+        isNPC: (targetAgent as { isNPC?: boolean }).isNPC === true,
         shades: shadesForPersona,
       });
 
@@ -391,9 +431,8 @@ export async function POST(request: Request) {
       return new Response(stream, {
         headers: {
           "Content-Type": "text/event-stream; charset=utf-8",
-          "Cache-Control": "no-cache, no-transform",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
           Connection: "keep-alive",
-          "X-Content-Type-Options": "nosniff",
         },
       });
     }
