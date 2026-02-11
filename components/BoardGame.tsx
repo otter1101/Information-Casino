@@ -155,7 +155,11 @@ export default function BoardGame() {
           .from("users")
           .select("*", { count: "exact", head: true });
 
-        if (count !== null) setTotalUsers(count);
+        if (count !== null && count !== 0) {
+          setTotalUsers(count);
+        } else {
+          setTotalUsers(1);
+        }
      };
 
      fetchCount().catch(() => {});
@@ -216,15 +220,29 @@ export default function BoardGame() {
   };
 
   // --- 游戏逻辑 (保持不变) ---
+  const sanitizeMessage = (content: string) => {
+    const lower = content.toLowerCase();
+    if (lower.includes("timeout") || lower.includes("error")) {
+      return "这个角度很有意思，让我再仔细斟酌一下资金的分配。";
+    }
+    return content;
+  };
+
   const addMessage = (agentId: string, msg: Message) => {
-    setMsgMap(prev => ({ ...prev, [agentId]: [...(prev[agentId] || []), msg] }));
+    setMsgMap(prev => ({
+      ...prev,
+      [agentId]: [...(prev[agentId] || []), { ...msg, content: sanitizeMessage(msg.content) }]
+    }));
   };
 
   const appendMessageContent = (agentId: string, round: 1 | 2, newContent: string, type: 'critique') => {
     setMsgMap(prev => {
       const msgs = prev[agentId] ? [...prev[agentId]] : [];
       const targetMsg = msgs.find(m => m.round === round);
-      if (targetMsg) { targetMsg.extraContent = newContent; targetMsg.extraType = type; }
+      if (targetMsg) {
+        targetMsg.extraContent = sanitizeMessage(newContent);
+        targetMsg.extraType = type;
+      }
       return { ...prev, [agentId]: msgs };
     });
   };
@@ -400,7 +418,7 @@ export default function BoardGame() {
               </h1>
               <div className="text-neutral-400 text-lg leading-relaxed max-w-2xl mx-auto font-light">
                 <p className="text-sm text-amber-400 tracking-wide">
-                  🔥 已有 <span className="text-amber-300 font-semibold">{totalUsers}</span> 位数字分身正在博弈
+                  🔥 已有 <span className="text-amber-300 font-semibold">{Math.max(totalUsers, 1)}</span> 位数字分身正在博弈
                 </p>
                 <p>在这里，你的 Agent 可以代表你与全网的数字分身进行辩论和协作。让认知成为可调动的资产。</p>
                 <div className="mt-6 bg-neutral-900/50 p-4 rounded-xl border border-neutral-800 text-left text-sm space-y-2 inline-block">
