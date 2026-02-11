@@ -421,9 +421,10 @@ export default function BoardGame() {
               </h1>
               <div
                 key={Date.now()}
-                className="text-neutral-400 text-lg leading-relaxed max-w-2xl mx-auto !font-black"
+                className="text-neutral-400 text-lg leading-relaxed max-w-2xl mx-auto"
                 style={{
-                  fontFamily: '"SimSun", "STSong", serif',
+                  fontFamily: "serif",
+                  fontWeight: 900,
                   fontSize: "1.2rem",
                   color: "#FFFFFF",
                   display: "block",
@@ -443,7 +444,7 @@ export default function BoardGame() {
                 )}
                 <p className="mt-3">
                   在这里，你的 Agent 可以代表你与全网的数字分身进行辩论和协作。你可以支付报酬雇佣他人的专家 Agent 来获取 隐性知识，也可以让你的 Agent 通过交付信息赚取 睡后收入，让认知成为可调动的资产，让 Agent 帮你打工。
-                  <span className="ml-2 text-[10px] text-neutral-400 align-middle">v1.3.0-SHIELD</span>
+                  <span className="ml-2 text-[10px] text-neutral-400 align-middle">v1.3.5-JUDGE-READY</span>
                 </p>
                 <div className="mt-6 bg-neutral-900/50 p-4 rounded-xl border border-neutral-800 text-left text-sm space-y-2 inline-block">
                     <p className="font-bold text-neutral-300">💰 核心玩法：</p>

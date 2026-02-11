@@ -126,6 +126,43 @@ const callMiniMaxStream = async (systemPrompt: string, userContent: string) => {
   });
 };
 
+const callMiniMaxOnce = async (systemPrompt: string, userContent: string) => {
+  const apiKey = (globalThis as { MINIMAX_API_KEY?: string }).MINIMAX_API_KEY;
+  if (!apiKey || !apiKey.startsWith("sk-")) {
+    throw new Error("missing_key");
+  }
+
+  const res = await fetch(MINIMAX_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: MINIMAX_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
+      ],
+      temperature: 0.7,
+      max_tokens: 240,
+      stream: false,
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error("minimax_failed");
+  }
+
+  const json = await res.json();
+  return (
+    json.choices?.[0]?.message?.content ||
+    json.choices?.[0]?.delta?.content ||
+    json.text ||
+    ""
+  );
+};
+
 const streamFromMiniMax = async (
   systemPrompt: string,
   userContent: string,
@@ -226,6 +263,7 @@ export async function POST(request: Request) {
       targetAgentName?: string;
       agentA?: string;
       agentB?: string;
+      agentIds?: string[];
       userName?: string;
       userShades?: any[];
     };
@@ -292,15 +330,28 @@ export async function POST(request: Request) {
       const hasServiceKey = !!(globalThis as { SUPABASE_SERVICE_KEY?: string })
         .SUPABASE_SERVICE_KEY;
       if (hasServiceKey) {
+        const fetchMoreOtherAgents = async () => {
+          if (!currentUserId) return [];
+          const { data } = await supabase
+            .from("users")
+            .select("*")
+            .neq("id", currentUserId);
+          return data || [];
+        };
+
         let query = supabase.from("users").select("*");
         if (currentUserId) {
           query = query.neq("id", currentUserId);
         }
         const { data } = await query;
-        const candidates = data || [];
-        realCandidates = currentUserId
-          ? candidates.filter((user) => user.id !== currentUserId)
-          : candidates;
+        const randomAgents = data || [];
+        if (currentUserId) {
+          const filtered = randomAgents.filter((user) => user.id !== currentUserId);
+          realCandidates =
+            filtered.length < 2 ? await fetchMoreOtherAgents() : filtered;
+        } else {
+          realCandidates = randomAgents;
+        }
       }
 
       const isSelf = (id: string) =>
@@ -342,6 +393,49 @@ export async function POST(request: Request) {
       const biasNote =
         "禁止使用 AI 常用套话，必须根据你的背景给出具体、尖锐且带有主观偏见的判断。";
 
+      if (action === "BETTING" && Array.isArray(body.agentIds)) {
+        const responses: { agentId: string; content: string }[] = [];
+        for (const currentAgentId of body.agentIds) {
+          const targetAgent = await getAgentById(currentAgentId);
+          const shadesForPersona =
+            userShades && userShades.length > 0 ? userShades : targetAgent.shades || [];
+          const personaPrompt = buildPersonaPrompt(
+            safeDecode(userName),
+            shadesForPersona
+          );
+
+          const opponentName = targetAgentName || "水濑";
+          const opponentAnchor = buildOpponentAnchor(opponentName);
+          const systemPromptBase = targetAgent.isNPC
+            ? `${targetAgent.context}\n${opponentAnchor}`
+            : `${personaPrompt}\n${opponentAnchor}`;
+
+          let prompt = systemPromptBase;
+          if (type === "deep_dive") {
+            prompt = `${systemPromptBase}\n用户付费深挖。请给出执行步骤，120字以内。\n${biasNote}`;
+          } else {
+            prompt = `${systemPromptBase}\n用户付费加大火力。请犀利指出弱点，100字以内。\n${biasNote}`;
+          }
+
+          const fallbackResponse = buildTimeoutFallback({
+            name: safeDecode(targetAgent.name),
+            isNPC: (targetAgent as { isNPC?: boolean }).isNPC === true,
+            shades: shadesForPersona,
+          });
+
+          let content = "";
+          try {
+            content = await callMiniMaxOnce(prompt, "请直接输出观点。");
+          } catch {
+            content = fallbackResponse;
+          }
+
+          responses.push({ agentId: currentAgentId, content });
+        }
+
+        return NextResponse.json({ responses });
+      }
+
       if (action === "BETTING" && type === "synthesis") {
         const [agentAProfile, agentBProfile] = await Promise.all([
           getAgentById(agentA || ""),
@@ -377,6 +471,8 @@ ${biasNote}`;
             "Content-Type": "text/event-stream; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
             Connection: "keep-alive",
+            "Transfer-Encoding": "chunked",
+            "X-Accel-Buffering": "no",
           },
         });
       }
@@ -433,6 +529,8 @@ ${biasNote}`;
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
           Connection: "keep-alive",
+          "Transfer-Encoding": "chunked",
+          "X-Accel-Buffering": "no",
         },
       });
     }
